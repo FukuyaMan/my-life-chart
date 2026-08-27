@@ -103,6 +103,7 @@ const documentSchema = z.object({
 
 const today = new Date();
 const defaultBirth = `${getYear(today) - 30}-01-01`;
+const defaultEndAge = differenceInYears(today, parseISO(defaultBirth));
 const defaultDocument: TimelineDocument = {
   schemaVersion: 1,
   id: crypto.randomUUID(),
@@ -110,13 +111,13 @@ const defaultDocument: TimelineDocument = {
   mode: "lifetime",
   birth: defaultBirth,
   range: { start: defaultBirth, end: `${getYear(today) + 70}-01-01` },
-  endAge: 100,
+  endAge: defaultEndAge,
   showCalendarYear: true,
   events: [],
   updatedAt: new Date().toISOString(),
 };
 
-const STORAGE_KEY = "jinsei-graph:document:v1";
+const STORAGE_KEY = "jinsei-graph:document:v2";
 const THEME_KEY = "jinsei-graph:theme";
 const MARGIN = { top: 46, right: 34, bottom: 72, left: 52 };
 const GRAPH_HEIGHT = 460;
@@ -134,10 +135,20 @@ function safeDate(value: string, fallback = today) {
   return isValid(date) ? date : fallback;
 }
 
+function getWritableEnd(doc: TimelineDocument): Date {
+  if (doc.mode !== "lifetime") return safeDate(doc.range.end);
+  const start = safeDate(doc.birth);
+  const currentAge = differenceInYears(today, start);
+  return doc.endAge === currentAge ? today : addYears(start, doc.endAge);
+}
+
 function getFullRange(doc: TimelineDocument): [Date, Date] {
   if (doc.mode === "lifetime") {
     const start = safeDate(doc.birth);
-    return [start, addYears(start, doc.endAge)];
+    const writableEnd = getWritableEnd(doc);
+    const spanDays = Math.max(1, differenceInCalendarDays(writableEnd, start));
+    const bufferDays = clamp(Math.round(spanDays * 0.03), 14, 120);
+    return [start, addDays(writableEnd, bufferDays)];
   }
   return [safeDate(doc.range.start), safeDate(doc.range.end)];
 }
@@ -145,7 +156,8 @@ function getFullRange(doc: TimelineDocument): [Date, Date] {
 function getModeRange(mode: Mode, doc: TimelineDocument): [Date, Date] {
   if (mode === "lifetime") {
     const start = safeDate(doc.birth);
-    return [start, addYears(start, doc.endAge)];
+    const next = { ...doc, mode };
+    return getFullRange(next);
   }
   if (mode === "year") {
     const start = startOfYear(today);
@@ -312,12 +324,14 @@ function App() {
     const time = safeDate(event.occurredAt).getTime();
     return time >= view[0].getTime() && time <= view[1].getTime();
   }).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)), [doc.events, view]);
+  const writableEnd = getWritableEnd(doc);
+  const writableEndX = xForDate(writableEnd);
 
   const linePoints = useMemo(() => {
     const points = [
       { date: view[0], score: 0 },
       ...visibleEvents.map((event) => ({ date: safeDate(event.occurredAt), score: event.score })),
-      { date: view[1], score: 0 },
+      { date: writableEnd < view[1] ? writableEnd : view[1], score: 0 },
     ];
     return points.map((item) => `${xForDate(item.date)},${yForScore(item.score)}`).join(" ");
   }, [visibleEvents, view, plotWidth]);
@@ -352,6 +366,10 @@ function App() {
 
   const openNewEvent = (date = new Date((view[0].getTime() + view[1].getTime()) / 2), score = 0) => {
     if (readOnly) return;
+    if (date > getWritableEnd(doc)) {
+      setToast("未来の余白には出来事を追加できません");
+      return;
+    }
     setModal({
       open: true,
       event: { id: crypto.randomUUID(), occurredAt: format(date, "yyyy-MM-dd"), datePrecision: unit === "year" ? "year" : unit === "month" ? "month" : "day", score, title: "", description: "" },
@@ -457,7 +475,9 @@ function App() {
   const onGraphMove = (event: ReactPointerEvent<SVGSVGElement>) => {
     const next = pointerFromEvent(event.clientX, event.clientY);
     if (dragging && !readOnly) {
-      updateDoc((current) => ({ ...current, events: current.events.map((item) => item.id === dragging ? { ...item, occurredAt: format(next.date, "yyyy-MM-dd"), score: next.score } : item) }), false);
+      const end = getWritableEnd(doc);
+      const eventDate = next.date > end ? end : next.date;
+      updateDoc((current) => ({ ...current, events: current.events.map((item) => item.id === dragging ? { ...item, occurredAt: format(eventDate, "yyyy-MM-dd"), score: next.score } : item) }), false);
     } else {
       setPointer(next);
     }
@@ -552,6 +572,11 @@ function App() {
                   <text className="y-label" x={MARGIN.left - 14} y={yForScore(score) + 4} textAnchor="end">{score > 0 ? `+${score}` : score}</text>
                 </g>
               ))}
+              {doc.mode === "lifetime" && writableEnd >= view[0] && writableEnd <= view[1] && <g className="future-buffer">
+                <rect x={writableEndX} y={MARGIN.top} width={Math.max(0, width - MARGIN.right - writableEndX)} height={plotHeight} />
+                <line x1={writableEndX} x2={writableEndX} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
+                <text x={writableEndX - 7} y={MARGIN.top + 14} textAnchor="end">今日</text>
+              </g>}
               <text className="axis-caption" x={14} y={22}>実感スコア</text>
               {ticks.map((tick) => {
                 const label = formatTick(tick, unit, doc);
