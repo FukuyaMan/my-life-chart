@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">My Life Chart</title>
+  <desc id="description">あなたの人生を、一本の線に。</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbfaf6"/>
+      <stop offset="1" stop-color="#f4f1e9"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#26354a" flood-opacity=".14"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="url(#background)"/>
+  <g stroke="#cbc7bd" stroke-width="1.2" stroke-dasharray="4 8" opacity=".74">
+    <path d="M80 360H1150M80 440H1150M80 520H1150"/>
+    <path d="M170 330V550M310 330V550M450 330V550M590 330V550M730 330V550M870 330V550M1010 330V550"/>
+  </g>
+  <text x="92" y="166" fill="#26354a" font-family="Noto Sans JP" font-size="76" font-weight="700" letter-spacing="1.5">My Life Chart</text>
+  <text x="96" y="224" fill="#26354a" font-family="Noto Sans JP" font-size="30" font-weight="500">あなたの人生を、一本の線に。</text>
+  <path d="M60 490 C110 490 110 455 180 455 C250 455 250 510 330 510 C410 510 410 350 500 350 C590 350 590 500 660 500 C730 500 730 410 800 410 C870 410 870 495 930 495 C1000 495 1000 330 1080 330 C1120 330 1135 320 1150 310" fill="none" stroke="#26354a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <g stroke="#fbfaf6" stroke-width="4" filter="url(#shadow)">
+    <circle cx="180" cy="455" r="10" fill="#4f93df"/>
+    <circle cx="330" cy="510" r="10" fill="#4f93df"/>
+    <circle cx="500" cy="350" r="10" fill="#f47c61"/>
+    <circle cx="660" cy="500" r="10" fill="#4f93df"/>
+    <circle cx="800" cy="410" r="10" fill="#f47c61"/>
+    <circle cx="930" cy="495" r="10" fill="#4f93df"/>
+    <circle cx="1080" cy="330" r="10" fill="#f47c61"/>
+  </g>
+</svg>
