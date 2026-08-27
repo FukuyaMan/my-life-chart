@@ -180,7 +180,7 @@ function getFullRange(doc: TimelineDocument): [Date, Date] {
     const start = safeDate(doc.birth);
     const writableEnd = getWritableEnd(doc);
     const spanDays = Math.max(1, differenceInCalendarDays(writableEnd, start));
-    const bufferDays = clamp(Math.round(spanDays * 0.03), 14, 120);
+    const bufferDays = clamp(Math.round(spanDays * 0.08), 30, 183);
     return [start, addDays(writableEnd, bufferDays)];
   }
   return [safeDate(doc.range.start), safeDate(doc.range.end)];
@@ -297,6 +297,7 @@ function App() {
   const [shareOpen, setShareOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [pointer, setPointer] = useState<{ date: Date; score: number; x: number; y: number } | null>(null);
+  const [hoveredEvent, setHoveredEvent] = useState<TimelineEvent | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const [width, setWidth] = useState(900);
   const graphWrapRef = useRef<HTMLDivElement>(null);
@@ -606,7 +607,7 @@ function App() {
     <div className={`app-shell ${eventsOpen ? "events-panel-open" : ""}`}>
       <header className="topbar">
         <div className="brand" aria-label="人生グラフ ホーム">
-          <span className="brand-mark"><span /></span>
+          <img className="brand-mark" src="/favicon.svg" alt="" />
           <span>人生グラフ</span>
         </div>
         <div className="top-actions">
@@ -634,11 +635,11 @@ function App() {
           <div>
             <p className="eyebrow">MY LIFE, IN ONE LINE</p>
             <div className="title-editor">
-              <input ref={titleRef} className="title-input" aria-label="人生グラフのタイトル" value={doc.title} readOnly={readOnly} maxLength={60} style={{ width: `${Math.max(4, [...doc.title].length + 1)}em` }} onChange={(event) => updateDoc((current) => ({ ...current, title: event.target.value }))} />
+              <input ref={titleRef} className="title-input" aria-label="人生グラフのタイトル" value={doc.title} readOnly={readOnly} maxLength={60} style={{ width: `${Math.max(4, [...doc.title].length + 0.15)}em` }} onChange={(event) => updateDoc((current) => ({ ...current, title: event.target.value }))} />
               {!readOnly && <IconButton label="タイトルを編集" onClick={() => { titleRef.current?.focus(); titleRef.current?.select(); }}><Pencil size={15} /></IconButton>}
             </div>
             {doc.mode === "lifetime" && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
-              <label><span className="birth-date-control"><input aria-label="生年月日" type="text" inputMode="numeric" placeholder="YYYY/MM/DD" value={birthDraft} readOnly={readOnly} onChange={(e) => { setBirthDraft(e.target.value); const parsed = parseDateInput(e.target.value); if (parsed) changeBirthDate(parsed); }} />{!readOnly && <span className="calendar-picker"><CalendarDays size={15} /><input aria-label="カレンダーから生年月日を選択" type="date" value={doc.birth} onChange={(e) => { if (e.target.value) { setBirthDraft(e.target.value.replaceAll("-", "/")); changeBirthDate(e.target.value); } }} /></span>}</span><span>生まれ</span></label>
+              <label><input className="birth-native-date" aria-label="生年月日" type="date" value={parseDateInput(birthDraft) ?? ""} readOnly={readOnly} onChange={(e) => { setBirthDraft(e.target.value); if (e.target.value) changeBirthDate(e.target.value); }} /><span>生まれ</span></label>
               <span className="quick-divider">·</span>
               <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
             </div>}
@@ -729,17 +730,30 @@ function App() {
                 const displayTitle = event.title.length > 16 ? `${event.title.slice(0, 15)}…` : event.title;
                 const titleWidth = Math.max(34, [...displayTitle].length * 10 + 14);
                 const titleX = nearLeft ? labelX - 6 : labelX - titleWidth / 2;
-                return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onDoubleClick={(e) => { e.stopPropagation(); if (!eventDragMovedRef.current) setModal({ open: true, event }); }} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
+                return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onPointerEnter={() => setHoveredEvent(event)} onPointerLeave={() => setHoveredEvent(null)} onDoubleClick={(e) => { e.stopPropagation(); if (!eventDragMovedRef.current) setModal({ open: true, event }); }} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
                   <line className="event-stem" x1={x} x2={x} y1={y} y2={labelY + (above ? 8 : -14)} />
                   <circle className={`event-dot ${eventTone(event.score)}`} cx={x} cy={y} r="7" onPointerDown={(e) => { e.stopPropagation(); dragStartRef.current = doc; eventDragStartRef.current = { x: e.clientX, y: e.clientY }; eventDragMovedRef.current = false; setDragging(event.id); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); }} />
                   <rect className="event-title-bg" x={titleX} y={labelY - 14} width={titleWidth} height="20" rx="5" />
                   <text className="event-title" x={labelX} y={labelY} textAnchor={nearLeft ? "start" : "middle"}>{displayTitle}</text>
-                  <text className="event-score" x={labelX} y={labelY + 16} textAnchor={nearLeft ? "start" : "middle"}>{event.score > 0 ? `+${event.score}` : event.score}</text>
                   {index === visibleEvents.length - 1 && <title>{event.title}</title>}
                 </g>;
               })}
 
-              {pointer && !dragging && pointer.x >= MARGIN.left && pointer.x <= width - MARGIN.right && pointer.y >= MARGIN.top && pointer.y <= GRAPH_HEIGHT - MARGIN.bottom && (
+              {hoveredEvent && !dragging && (() => {
+                const x = xForDate(safeDate(hoveredEvent.occurredAt));
+                const y = yForScore(hoveredEvent.score);
+                const popupX = clamp(x - 120, MARGIN.left, width - MARGIN.right - 240);
+                const popupY = y > MARGIN.top + 105 ? y - 96 : y + 18;
+                const summary = hoveredEvent.description.trim() || "詳細はまだ記録されていません";
+                return <g className="event-popover" pointerEvents="none" transform={`translate(${popupX},${popupY})`}>
+                  <rect width="240" height="78" rx="12" />
+                  <text className="event-popover-title" x="14" y="22">{hoveredEvent.title.length > 20 ? `${hoveredEvent.title.slice(0, 19)}…` : hoveredEvent.title}</text>
+                  <text className="event-popover-date" x="14" y="40">{eventDateLabel(hoveredEvent, doc)}</text>
+                  <text className="event-popover-summary" x="14" y="61">{summary.length > 28 ? `${summary.slice(0, 27)}…` : summary}</text>
+                </g>;
+              })()}
+
+              {pointer && !hoveredEvent && !dragging && pointer.x >= MARGIN.left && pointer.x <= width - MARGIN.right && pointer.y >= MARGIN.top && pointer.y <= GRAPH_HEIGHT - MARGIN.bottom && (
                 <g className="crosshair" pointerEvents="none">
                   <line x1={pointer.x} x2={pointer.x} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
                   <line x1={MARGIN.left} x2={width - MARGIN.right} y1={pointer.y} y2={pointer.y} />
@@ -802,7 +816,7 @@ function EventDialog({ event, doc, readOnly, onClose, onSave, onDelete }: { even
     <form className="dialog" onSubmit={submit} onMouseDown={(e) => e.stopPropagation()}>
       <div className="dialog-header"><div><p className="eyebrow">LIFE EVENT</p><h2>{readOnly ? "出来事" : isExisting ? "出来事を編集" : "出来事を追加"}</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
       <label>タイトル<input autoFocus={!readOnly && !isBirth} required maxLength={60} readOnly={readOnly || isBirth} value={draft.title} placeholder="どんな出来事でしたか？" onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
-      <label>{precision === "year" ? "年" : precision === "month" ? "年月" : "日付"}<input type={precision === "year" ? "number" : precision === "month" ? "month" : "date"} min={precision === "year" ? "1900" : undefined} max={maxDateValue} readOnly={readOnly || isBirth} value={dateValue} onChange={(e) => changeEventDate(e.target.value)} /></label>
+      <label className="event-date-field"><span>{precision === "year" ? "年" : precision === "month" ? "年月" : "日付"}<small>グラフの記録単位に合わせて入力します</small></span><div><input type={precision === "year" ? "number" : precision === "month" ? "month" : "date"} inputMode={precision === "year" ? "numeric" : undefined} min={precision === "year" ? "1900" : undefined} max={maxDateValue} readOnly={readOnly || isBirth} value={dateValue} onChange={(e) => changeEventDate(e.target.value)} /><b>{precision === "year" ? "年単位" : precision === "month" ? "月単位" : "日単位"}</b></div></label>
       <label>スコア <output>{draft.score > 0 ? `+${draft.score}` : draft.score}</output><input autoFocus={!readOnly && isBirth} className="score-range" type="range" min="-100" max="100" step="10" disabled={readOnly} value={draft.score} onChange={(e) => setDraft({ ...draft, score: Number(e.target.value) })} /><span className="range-labels"><span>つらかった</span><span>穏やか</span><span>最高だった</span></span></label>
       <label>ひとこと <span className="optional">任意</span><textarea maxLength={500} readOnly={readOnly || isBirth} value={draft.description} placeholder="そのときの気持ちや、覚えておきたいこと" onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label>
       {!readOnly && <div className="dialog-actions">{isExisting && draft.id !== "birth" ? <button type="button" className="button danger" onClick={() => onDelete(draft.id)}><Trash2 size={17} />削除</button> : <span />}<div><button type="button" className="button secondary" onClick={onClose}>キャンセル</button><button type="submit" className="button primary">保存する</button></div></div>}
@@ -818,7 +832,7 @@ function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: Timeli
     <label>何歳まで表示するか<div className="setting-with-suffix"><input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><span>歳まで</span></div></label>
     {draft.mode === "custom" && <div className="field-row"><label>開始日<input type="date" value={draft.range.start} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, start: e.target.value } })} /></label><label>終了日<input type="date" value={draft.range.end} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, end: e.target.value } })} /></label></div>}
     <label className="toggle-row"><span><strong>西暦を表示</strong><small>年齢の下に西暦を添えます</small></span><input type="checkbox" checked={draft.showCalendarYear} onChange={(e) => setDraft({ ...draft, showCalendarYear: e.target.checked })} /></label>
-    <label className="birth-year-field">生年月日<div className="birth-date-control settings-date-control"><input type="text" inputMode="numeric" placeholder="YYYY/MM/DD" value={birthInput} onChange={(e) => { setBirthInput(e.target.value); const parsed = parseDateInput(e.target.value); if (parsed) setDraft(withBirth(draft, parsed)); }} /><span className="calendar-picker"><CalendarDays size={16} /><input aria-label="カレンダーから生年月日を選択" type="date" value={draft.birth} onChange={(e) => { if (e.target.value) { setBirthInput(e.target.value.replaceAll("-", "/")); setDraft(withBirth(draft, e.target.value)); } }} /></span></div><small>入力中は空欄にできます。有効な日付になると「誕生」と終了年齢を更新します</small></label>
+    <label className="birth-year-field">生年月日<input type="date" value={parseDateInput(birthInput) ?? ""} onChange={(e) => { setBirthInput(e.target.value); if (e.target.value) setDraft(withBirth(draft, e.target.value)); }} /><small>カレンダーから選択できます。空欄のまま入力途中にすることもできます</small></label>
     <fieldset><legend>グラフの線</legend><div className="theme-options line-style-options">{([['curve', '曲線'], ['straight', '直線']] as const).map(([value, text]) => <button type="button" key={value} className={draft.lineStyle === value ? "selected" : ""} onClick={() => setDraft({ ...draft, lineStyle: value })}>{text}{draft.lineStyle === value && <Check size={15} />}</button>)}</div></fieldset>
     <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={theme === value ? "selected" : ""} onClick={() => onTheme(value)}><Icon size={18} />{text}{theme === value && <Check size={15} />}</button>)}</div></fieldset>
     <div className="clear-events"><div><strong>出来事をクリア</strong><small>誕生を残して、追加した出来事をすべて削除します</small></div><button type="button" className="button danger" disabled={!draft.events.some((item) => item.id !== "birth")} onClick={() => { if (window.confirm("「誕生」以外の出来事をすべて削除しますか？")) setDraft({ ...draft, events: draft.events.filter((item) => item.id === "birth") }); }}><Trash2 size={16} />クリア</button></div>
