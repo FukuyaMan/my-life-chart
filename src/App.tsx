@@ -67,7 +67,7 @@ type TimelineEvent = {
 };
 
 type TimelineDocument = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   title: string;
   mode: Mode;
@@ -75,6 +75,7 @@ type TimelineDocument = {
   range: { start: string; end: string };
   endAge: number;
   showCalendarYear: boolean;
+  inputPrecision: Precision;
   events: TimelineEvent[];
   updatedAt: string;
 };
@@ -89,7 +90,7 @@ const eventSchema = z.object({
 });
 
 const documentSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   id: z.string(),
   title: z.string(),
   mode: z.enum(["lifetime", "year", "custom"]),
@@ -97,6 +98,7 @@ const documentSchema = z.object({
   range: z.object({ start: z.string(), end: z.string() }),
   endAge: z.number().min(1).max(120),
   showCalendarYear: z.boolean(),
+  inputPrecision: z.enum(["year", "month", "day"]),
   events: z.array(eventSchema),
   updatedAt: z.string(),
 });
@@ -105,7 +107,7 @@ const today = new Date();
 const defaultBirth = `${getYear(today) - 30}-01-01`;
 const defaultEndAge = differenceInYears(today, parseISO(defaultBirth));
 const defaultDocument: TimelineDocument = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   id: crypto.randomUUID(),
   title: "わたしの人生グラフ",
   mode: "lifetime",
@@ -113,11 +115,12 @@ const defaultDocument: TimelineDocument = {
   range: { start: defaultBirth, end: `${getYear(today) + 70}-01-01` },
   endAge: defaultEndAge,
   showCalendarYear: true,
+  inputPrecision: "year",
   events: [],
   updatedAt: new Date().toISOString(),
 };
 
-const STORAGE_KEY = "jinsei-graph:document:v2";
+const STORAGE_KEY = "jinsei-graph:document:v3";
 const THEME_KEY = "jinsei-graph:theme";
 const MARGIN = { top: 46, right: 34, bottom: 72, left: 52 };
 const GRAPH_HEIGHT = 460;
@@ -128,6 +131,16 @@ function clamp(value: number, min: number, max: number) {
 
 function systemTheme(): "light" | "dark" {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function snapDate(date: Date, precision: Precision): Date {
+  if (precision === "year") return startOfYear(date);
+  if (precision === "month") return startOfMonth(date);
+  return parseISO(format(date, "yyyy-MM-dd"));
+}
+
+function currentAgeFromBirthYear(year: number): number {
+  return clamp(getYear(today) - year, 1, 120);
 }
 
 function safeDate(value: string, fallback = today) {
@@ -318,7 +331,7 @@ function App() {
   const xForDate = (date: Date) => MARGIN.left + ((date.getTime() - view[0].getTime()) / viewMs) * plotWidth;
   const dateForX = (x: number) => new Date(view[0].getTime() + clamp((x - MARGIN.left) / plotWidth, 0, 1) * viewMs);
   const yForScore = (score: number) => MARGIN.top + ((100 - score) / 200) * plotHeight;
-  const scoreForY = (y: number) => Math.round(clamp(100 - ((y - MARGIN.top) / plotHeight) * 200, -100, 100));
+  const scoreForY = (y: number) => Math.round(clamp(100 - ((y - MARGIN.top) / plotHeight) * 200, -100, 100) / 10) * 10;
   const { unit, label: unitLabel, ticks } = useMemo(() => makeTicks(view[0], view[1]), [view]);
   const visibleEvents = useMemo(() => doc.events.filter((event) => {
     const time = safeDate(event.occurredAt).getTime();
@@ -370,13 +383,18 @@ function App() {
       setToast("未来の余白には出来事を追加できません");
       return;
     }
+    const snappedDate = snapDate(date, doc.inputPrecision);
     setModal({
       open: true,
-      event: { id: crypto.randomUUID(), occurredAt: format(date, "yyyy-MM-dd"), datePrecision: unit === "year" ? "year" : unit === "month" ? "month" : "day", score, title: "", description: "" },
+      event: { id: crypto.randomUUID(), occurredAt: format(snappedDate, "yyyy-MM-dd"), datePrecision: doc.inputPrecision, score: Math.round(score / 10) * 10, title: "", description: "" },
     });
   };
 
   const saveEvent = (event: TimelineEvent) => {
+    if (safeDate(event.occurredAt) > getWritableEnd(doc)) {
+      setToast("表示範囲より未来の出来事は保存できません");
+      return;
+    }
     updateDoc((current) => ({ ...current, events: [...current.events.filter((item) => item.id !== event.id), event].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)) }));
     setModal({ open: false, event: null });
     setToast("出来事を保存しました");
@@ -465,6 +483,19 @@ function App() {
     setView(range);
   };
 
+  const changeBirthYear = (year: number) => {
+    const safeYear = clamp(year, 1900, getYear(today));
+    const next = { ...doc, birth: `${safeYear}-01-01`, endAge: currentAgeFromBirthYear(safeYear) };
+    updateDoc(() => next);
+    setView(getFullRange(next));
+  };
+
+  const changeEndAge = (endAge: number) => {
+    const next = { ...doc, endAge: clamp(endAge, 1, 120) };
+    updateDoc(() => next);
+    setView(getFullRange(next));
+  };
+
   const duplicateShared = () => {
     const editable = { ...doc, id: crypto.randomUUID(), updatedAt: new Date().toISOString() };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(editable));
@@ -476,7 +507,7 @@ function App() {
     const next = pointerFromEvent(event.clientX, event.clientY);
     if (dragging && !readOnly) {
       const end = getWritableEnd(doc);
-      const eventDate = next.date > end ? end : next.date;
+      const eventDate = snapDate(next.date > end ? end : next.date, doc.inputPrecision);
       updateDoc((current) => ({ ...current, events: current.events.map((item) => item.id === dragging ? { ...item, occurredAt: format(eventDate, "yyyy-MM-dd"), score: next.score } : item) }), false);
     } else {
       setPointer(next);
@@ -523,6 +554,11 @@ function App() {
               maxLength={60}
               onChange={(event) => updateDoc((current) => ({ ...current, title: event.target.value }))}
             />
+            {doc.mode === "lifetime" && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
+              <label><input aria-label="生まれた年" type="number" min="1900" max={getYear(today)} value={getYear(safeDate(doc.birth))} readOnly={readOnly} onChange={(e) => changeBirthYear(Number(e.target.value))} /><span>年生まれ</span></label>
+              <span className="quick-divider">·</span>
+              <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
+            </div>}
           </div>
           <div className="mode-switch" aria-label="表示期間">
             {([['lifetime', '人生'], ['year', '一年'], ['custom', '期間']] as const).map(([value, text]) => (
@@ -534,6 +570,7 @@ function App() {
         <section className="graph-card" aria-label="人生グラフ">
           <div className="graph-toolbar">
             <div className="date-window"><CalendarDays size={16} /><span>{formatRange(view[0], view[1])}</span><span className="unit-pill">{unitLabel}表示</span></div>
+            {!readOnly && <div className="precision-control"><span>記録単位</span><div>{([['year', '年'], ['month', '月'], ['day', '日']] as const).map(([value, text]) => <button key={value} className={doc.inputPrecision === value ? "active" : ""} onClick={() => updateDoc((current) => ({ ...current, inputPrecision: value }))}>{text}</button>)}</div></div>}
             <div className="zoom-controls">
               <IconButton label="前の期間へ" onClick={() => pan(-1)}><ChevronLeft size={17} /></IconButton>
               <IconButton label="縮小" onClick={() => zoom(1.7)}><Minus size={17} /></IconButton>
@@ -660,20 +697,27 @@ function App() {
 function EventDialog({ event, doc, readOnly, onClose, onSave, onDelete }: { event: TimelineEvent; doc: TimelineDocument; readOnly: boolean; onClose: () => void; onSave: (event: TimelineEvent) => void; onDelete: (id: string) => void }) {
   const [draft, setDraft] = useState(event);
   const isExisting = doc.events.some((item) => item.id === event.id);
+  const dateValue = draft.datePrecision === "year" ? draft.occurredAt.slice(0, 4) : draft.datePrecision === "month" ? draft.occurredAt.slice(0, 7) : draft.occurredAt;
+  const writableEnd = getWritableEnd(doc);
+  const maxDateValue = draft.datePrecision === "year" ? format(writableEnd, "yyyy") : draft.datePrecision === "month" ? format(writableEnd, "yyyy-MM") : format(writableEnd, "yyyy-MM-dd");
+  const changeEventDate = (value: string) => {
+    const occurredAt = draft.datePrecision === "year" ? `${value}-01-01` : draft.datePrecision === "month" ? `${value}-01` : value;
+    setDraft({ ...draft, occurredAt });
+  };
   const submit = (formEvent: FormEvent) => {
     formEvent.preventDefault();
     if (!draft.title.trim()) return;
-    onSave({ ...draft, title: draft.title.trim(), score: clamp(Number(draft.score), -100, 100) });
+    onSave({ ...draft, title: draft.title.trim(), score: Math.round(clamp(Number(draft.score), -100, 100) / 10) * 10 });
   };
   return <div className="modal-backdrop" onMouseDown={onClose}>
     <form className="dialog" onSubmit={submit} onMouseDown={(e) => e.stopPropagation()}>
       <div className="dialog-header"><div><p className="eyebrow">LIFE EVENT</p><h2>{readOnly ? "出来事" : isExisting ? "出来事を編集" : "出来事を追加"}</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
       <label>タイトル<input autoFocus={!readOnly} required maxLength={60} readOnly={readOnly} value={draft.title} placeholder="どんな出来事でしたか？" onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
       <div className="field-row">
-        <label>日付<input type="date" readOnly={readOnly} value={draft.occurredAt} onChange={(e) => setDraft({ ...draft, occurredAt: e.target.value })} /></label>
-        <label>記録の細かさ<select disabled={readOnly} value={draft.datePrecision} onChange={(e) => setDraft({ ...draft, datePrecision: e.target.value as Precision })}><option value="day">日まで</option><option value="month">月まで</option><option value="year">年まで</option></select></label>
+        <label>{draft.datePrecision === "year" ? "年" : draft.datePrecision === "month" ? "年月" : "日付"}<input type={draft.datePrecision === "year" ? "number" : draft.datePrecision === "month" ? "month" : "date"} min={draft.datePrecision === "year" ? "1900" : undefined} max={maxDateValue} readOnly={readOnly} value={dateValue} onChange={(e) => changeEventDate(e.target.value)} /></label>
+        <label>記録単位<select disabled={readOnly} value={draft.datePrecision} onChange={(e) => { const precision = e.target.value as Precision; setDraft({ ...draft, datePrecision: precision, occurredAt: format(snapDate(safeDate(draft.occurredAt), precision), "yyyy-MM-dd") }); }}><option value="year">年</option><option value="month">月</option><option value="day">日</option></select></label>
       </div>
-      <label>実感スコア <output>{draft.score > 0 ? `+${draft.score}` : draft.score}</output><input className="score-range" type="range" min="-100" max="100" step="1" disabled={readOnly} value={draft.score} onChange={(e) => setDraft({ ...draft, score: Number(e.target.value) })} /><span className="range-labels"><span>つらかった</span><span>穏やか</span><span>最高だった</span></span></label>
+      <label>実感スコア <output>{draft.score > 0 ? `+${draft.score}` : draft.score}</output><input className="score-range" type="range" min="-100" max="100" step="10" disabled={readOnly} value={draft.score} onChange={(e) => setDraft({ ...draft, score: Number(e.target.value) })} /><span className="range-labels"><span>つらかった</span><span>穏やか</span><span>最高だった</span></span></label>
       <label>ひとこと <span className="optional">任意</span><textarea maxLength={500} readOnly={readOnly} value={draft.description} placeholder="そのときの気持ちや、覚えておきたいこと" onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label>
       {!readOnly && <div className="dialog-actions">{isExisting ? <button type="button" className="button danger" onClick={() => onDelete(draft.id)}><Trash2 size={17} />削除</button> : <span />}<div><button type="button" className="button secondary" onClick={onClose}>キャンセル</button><button type="submit" className="button primary">保存する</button></div></div>}
     </form>
@@ -685,10 +729,10 @@ function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: Timeli
   const birthYear = getYear(safeDate(draft.birth));
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><p className="eyebrow">PREFERENCES</p><h2>グラフの設定</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
     <label>タイトル<input maxLength={60} value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
-    <fieldset className="age-range-fieldset"><legend>人生グラフの範囲</legend><div className="age-range-setting"><label>開始年齢<span className="fixed-age">0歳</span></label><span className="range-arrow">—</span><label>何歳まで<input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><b>歳</b></label></div><small>人生グラフは0歳から始まります</small></fieldset>
+    <label>何歳まで表示するか<div className="setting-with-suffix"><input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><span>歳まで</span></div></label>
     {draft.mode === "custom" && <div className="field-row"><label>開始日<input type="date" value={draft.range.start} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, start: e.target.value } })} /></label><label>終了日<input type="date" value={draft.range.end} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, end: e.target.value } })} /></label></div>}
     <label className="toggle-row"><span><strong>西暦を表示</strong><small>年齢の下に西暦を添えます</small></span><input type="checkbox" checked={draft.showCalendarYear} onChange={(e) => setDraft({ ...draft, showCalendarYear: e.target.checked })} /></label>
-    {draft.showCalendarYear && <label className="birth-year-field">生まれた年<div><input type="number" min="1900" max={getYear(today)} value={birthYear} onChange={(e) => setDraft({ ...draft, birth: `${clamp(Number(e.target.value), 1900, getYear(today))}-01-01` })} /><span>年生まれ</span></div><small>年齢に対応する西暦を表示します</small></label>}
+    {draft.showCalendarYear && <label className="birth-year-field">生まれた年<div><input type="number" min="1900" max={getYear(today)} value={birthYear} onChange={(e) => { const year = clamp(Number(e.target.value), 1900, getYear(today)); setDraft({ ...draft, birth: `${year}-01-01`, endAge: currentAgeFromBirthYear(year) }); }} /><span>年生まれ</span></div><small>変更すると終了年齢を現在の年齢に合わせます</small></label>}
     <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={theme === value ? "selected" : ""} onClick={() => onTheme(value)}><Icon size={18} />{text}{theme === value && <Check size={15} />}</button>)}</div></fieldset>
     <button className="button primary full" onClick={() => { onChange(draft); onClose(); }}>設定を保存</button>
   </aside></div>;
