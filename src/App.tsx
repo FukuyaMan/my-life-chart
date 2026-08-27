@@ -125,6 +125,10 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function systemTheme(): "light" | "dark" {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 function safeDate(value: string, fallback = today) {
   const date = parseISO(value);
   return isValid(date) ? date : fallback;
@@ -244,7 +248,23 @@ function App() {
   const svgRef = useRef<SVGSVGElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const dragStartRef = useRef<TimelineDocument | null>(null);
+  const themeCycleOriginRef = useRef<"light" | "dark">(systemTheme());
   const readOnly = Boolean(sharedDocument);
+  const effectiveTheme = theme === "auto" ? systemTheme() : theme;
+
+  const cycleTheme = () => {
+    if (theme === "auto") {
+      const current = systemTheme();
+      themeCycleOriginRef.current = current;
+      setTheme(current === "light" ? "dark" : "light");
+      return;
+    }
+    if (theme !== themeCycleOriginRef.current) {
+      setTheme(themeCycleOriginRef.current);
+      return;
+    }
+    setTheme("auto");
+  };
 
   const updateDoc = useCallback((updater: (current: TimelineDocument) => TimelineDocument, record = true) => {
     setDoc((current) => {
@@ -455,8 +475,8 @@ function App() {
             <IconButton label="元に戻す" onClick={undo} disabled={!history.length}><Undo2 size={18} /></IconButton>
             <IconButton label="やり直す" onClick={redo} disabled={!future.length}><Redo2 size={18} /></IconButton>
           </>}
-          <IconButton label="テーマを変更" onClick={() => setTheme((value) => value === "auto" ? "light" : value === "light" ? "dark" : "auto")}>
-            {theme === "dark" ? <Moon size={18} /> : theme === "light" ? <Sun size={18} /> : <span className="auto-theme">A</span>}
+          <IconButton label={`テーマを変更（現在: ${theme === "auto" ? `自動・${effectiveTheme === "light" ? "ライト" : "ダーク"}` : theme === "light" ? "ライト" : "ダーク"}）`} onClick={cycleTheme}>
+            {theme === "auto" ? <span className="auto-theme">A</span> : theme === "dark" ? <Moon size={18} /> : <Sun size={18} />}
           </IconButton>
           {!readOnly && <button className="button secondary compact" onClick={() => setSettingsOpen(true)}><Settings size={17} /><span>設定</span></button>}
           <button className="button primary compact" onClick={() => setShareOpen(true)}><Share2 size={17} /><span>共有</span></button>
@@ -637,12 +657,13 @@ function EventDialog({ event, doc, readOnly, onClose, onSave, onDelete }: { even
 
 function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: TimelineDocument; theme: Theme; onTheme: (theme: Theme) => void; onClose: () => void; onChange: (doc: TimelineDocument) => void }) {
   const [draft, setDraft] = useState(doc);
+  const birthYear = getYear(safeDate(draft.birth));
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><p className="eyebrow">PREFERENCES</p><h2>グラフの設定</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
     <label>タイトル<input maxLength={60} value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
-    <label>生年月日<input type="date" value={draft.birth} onChange={(e) => setDraft({ ...draft, birth: e.target.value })} /></label>
-    <label>人生モードの終了年齢<input type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /></label>
+    <fieldset className="age-range-fieldset"><legend>人生グラフの範囲</legend><div className="age-range-setting"><label>開始年齢<span className="fixed-age">0歳</span></label><span className="range-arrow">—</span><label>何歳まで<input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><b>歳</b></label></div><small>人生グラフは0歳から始まります</small></fieldset>
     {draft.mode === "custom" && <div className="field-row"><label>開始日<input type="date" value={draft.range.start} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, start: e.target.value } })} /></label><label>終了日<input type="date" value={draft.range.end} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, end: e.target.value } })} /></label></div>}
     <label className="toggle-row"><span><strong>西暦を表示</strong><small>年齢の下に西暦を添えます</small></span><input type="checkbox" checked={draft.showCalendarYear} onChange={(e) => setDraft({ ...draft, showCalendarYear: e.target.checked })} /></label>
+    {draft.showCalendarYear && <label className="birth-year-field">生まれた年<div><input type="number" min="1900" max={getYear(today)} value={birthYear} onChange={(e) => setDraft({ ...draft, birth: `${clamp(Number(e.target.value), 1900, getYear(today))}-01-01` })} /><span>年生まれ</span></div><small>年齢に対応する西暦を表示します</small></label>}
     <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={theme === value ? "selected" : ""} onClick={() => onTheme(value)}><Icon size={18} />{text}{theme === value && <Check size={15} />}</button>)}</div></fieldset>
     <button className="button primary full" onClick={() => { onChange(draft); onClose(); }}>設定を保存</button>
   </aside></div>;
