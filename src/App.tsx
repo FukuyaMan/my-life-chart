@@ -40,6 +40,8 @@ import {
   X,
 } from "lucide-react";
 import LZString from "lz-string";
+import { DayPicker } from "@daypicker/react";
+import "@daypicker/react/style.css";
 import {
   type ChangeEvent,
   type FormEvent,
@@ -288,6 +290,26 @@ function IconButton({ label, children, onClick, disabled = false }: { label: str
   return <button type="button" className="icon-button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
+function DatePickerField({ value, onChange, readOnly = false, compact = false }: { value: string; onChange: (value: string) => void; readOnly?: boolean; compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = safeDate(value);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return <div className={`date-picker-field ${compact ? "compact" : ""}`} ref={rootRef}>
+    <button type="button" className="date-picker-trigger" disabled={readOnly} aria-label={`生年月日 ${format(selected, "yyyy年M月d日")}`} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+      <span>{format(selected, "yyyy / MM / dd")}</span><CalendarDays size={15} />
+    </button>
+    {open && <div className="date-picker-popover"><DayPicker mode="single" locale={ja} selected={selected} defaultMonth={selected} captionLayout="dropdown" startMonth={new Date(1900, 0)} endMonth={today} onSelect={(date) => { if (date) { onChange(format(date, "yyyy-MM-dd")); setOpen(false); } }} /></div>}
+  </div>;
+}
+
 function App() {
   const sharedDocument = useMemo(() => {
     if (!location.hash.startsWith("#share=")) return null;
@@ -311,7 +333,6 @@ function App() {
   const [history, setHistory] = useState<TimelineDocument[]>([]);
   const [future, setFuture] = useState<TimelineDocument[]>([]);
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem(THEME_KEY) as Theme) || "auto");
-  const [birthDraft, setBirthDraft] = useState(doc.birth.replaceAll("-", "/"));
   const [view, setView] = useState<[Date, Date]>(() => getFullRange(sharedDocument || doc));
   const [modal, setModal] = useState<{ open: boolean; event: TimelineEvent | null }>({ open: false, event: null });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -365,8 +386,6 @@ function App() {
     if (!readOnly) localStorage.setItem(STORAGE_KEY, JSON.stringify(doc));
     document.title = `${doc.title} | 人生グラフ`;
   }, [doc, readOnly]);
-
-  useEffect(() => setBirthDraft(doc.birth.replaceAll("-", "/")), [doc.birth]);
 
   useEffect(() => {
     localStorage.setItem(THEME_KEY, theme);
@@ -442,12 +461,12 @@ function App() {
     }, `M ${points[0].x} ${points[0].y}`);
   }, [doc.events, doc.lineStyle, visibleEvents, view, plotWidth, writableEnd]);
 
-  const zoom = (factor: number) => {
-    const center = (view[0].getTime() + view[1].getTime()) / 2;
+  const zoom = (factor: number, anchorRatio = 0.5) => {
+    const anchor = view[0].getTime() + viewMs * clamp(anchorRatio, 0, 1);
     const nextSpan = clamp(viewMs * factor, 7 * 86400000, getFullRange(doc)[1].getTime() - getFullRange(doc)[0].getTime());
     const full = getFullRange(doc);
-    let start = center - nextSpan / 2;
-    let end = center + nextSpan / 2;
+    let start = anchor - nextSpan * anchorRatio;
+    let end = start + nextSpan;
     if (start < full[0].getTime()) { end += full[0].getTime() - start; start = full[0].getTime(); }
     if (end > full[1].getTime()) { start -= end - full[1].getTime(); end = full[1].getTime(); }
     setView([new Date(start), new Date(end)]);
@@ -468,7 +487,10 @@ function App() {
     if (!graph) return;
     const handleWheel = (event: globalThis.WheelEvent) => {
       event.preventDefault();
-      zoom(event.deltaY > 0 ? 1.22 : 0.82);
+      const rect = graph.getBoundingClientRect();
+      const svgX = ((event.clientX - rect.left) / Math.max(1, rect.width)) * width;
+      const anchorRatio = clamp((svgX - MARGIN.left) / plotWidth, 0, 1);
+      zoom(event.deltaY > 0 ? 1.22 : 0.82, anchorRatio);
     };
     graph.addEventListener("wheel", handleWheel, { passive: false });
     return () => graph.removeEventListener("wheel", handleWheel);
@@ -698,7 +720,7 @@ function App() {
               {!readOnly && <IconButton label="タイトルを編集" onClick={() => { titleRef.current?.focus(); titleRef.current?.select(); }}><Pencil size={15} /></IconButton>}
             </div>
             {doc.mode === "lifetime" && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
-              <label><input className="birth-text-date" aria-label="生年月日" type="text" inputMode="numeric" placeholder="YYYY/MM/DD" value={birthDraft.replaceAll("-", "/")} readOnly={readOnly} onChange={(e) => { setBirthDraft(e.target.value); const parsed = parseDateInput(e.target.value); if (parsed) changeBirthDate(parsed); }} /><span>生まれ</span></label>
+              <label><DatePickerField value={doc.birth} onChange={changeBirthDate} readOnly={readOnly} compact /><span>生まれ</span></label>
               <span className="quick-divider">·</span>
               <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
             </div>}
@@ -888,18 +910,23 @@ function EventDialog({ event, doc, readOnly, onClose, onSave, onDelete }: { even
 
 function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: TimelineDocument; theme: Theme; onTheme: (theme: Theme) => void; onClose: () => void; onChange: (doc: TimelineDocument) => void }) {
   const [draft, setDraft] = useState(doc);
-  const [birthInput, setBirthInput] = useState(doc.birth.replaceAll("-", "/"));
+  const [draftTheme, setDraftTheme] = useState(theme);
+  const comparable = (value: TimelineDocument) => {
+    const { updatedAt: _updatedAt, ...settings } = value;
+    return JSON.stringify(settings);
+  };
+  const isDirty = comparable(draft) !== comparable(doc) || draftTheme !== theme;
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><p className="eyebrow">PREFERENCES</p><h2>グラフの設定</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
     <label>タイトル<input maxLength={60} value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
     <label>何歳まで表示するか<div className="setting-with-suffix"><input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><span>歳まで</span></div></label>
     {draft.mode === "year" && <div className="field-row"><label>表示する年<input type="number" min="1" max="9999" value={draft.displayYear} onChange={(e) => setDraft(withYearRange(draft, Number(e.target.value), draft.yearStartMonth))} /></label><label>開始月<select value={draft.yearStartMonth} onChange={(e) => setDraft(withYearRange(draft, draft.displayYear, Number(e.target.value)))}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}月</option>)}</select></label></div>}
     {draft.mode === "custom" && <div className="field-row"><label>開始日<input type="date" value={draft.range.start} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, start: e.target.value } })} /></label><label>終了日<input type="date" value={draft.range.end} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, end: e.target.value } })} /></label></div>}
     <label className="toggle-row"><span><strong>西暦を表示</strong><small>年齢の下に西暦を添えます</small></span><input type="checkbox" checked={draft.showCalendarYear} onChange={(e) => setDraft({ ...draft, showCalendarYear: e.target.checked })} /></label>
-    <label className="birth-year-field">生年月日<input type="text" inputMode="numeric" placeholder="YYYY/MM/DD" value={birthInput.replaceAll("-", "/")} onChange={(e) => { setBirthInput(e.target.value); const parsed = parseDateInput(e.target.value); if (parsed) setDraft(withBirth(draft, parsed)); }} /><small>西暦／月／日の順に入力します。曜日欄は表示されません</small></label>
+    <label className="birth-year-field">生年月日<DatePickerField value={draft.birth} onChange={(birth) => setDraft(withBirth(draft, birth))} /><small>カレンダーから選択します。入力欄に曜日は表示されません</small></label>
     <fieldset><legend>グラフの線</legend><div className="theme-options line-style-options">{([['curve', '曲線'], ['straight', '直線']] as const).map(([value, text]) => <button type="button" key={value} className={draft.lineStyle === value ? "selected" : ""} onClick={() => setDraft({ ...draft, lineStyle: value })}>{text}{draft.lineStyle === value && <Check size={15} />}</button>)}</div></fieldset>
-    <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={theme === value ? "selected" : ""} onClick={() => onTheme(value)}><Icon size={18} />{text}{theme === value && <Check size={15} />}</button>)}</div></fieldset>
+    <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={draftTheme === value ? "selected" : ""} onClick={() => setDraftTheme(value)}><Icon size={18} />{text}{draftTheme === value && <Check size={15} />}</button>)}</div></fieldset>
     <div className="clear-events"><div><strong>出来事をクリア</strong><small>誕生を残して、追加した出来事をすべて削除します</small></div><button type="button" className="button danger" disabled={!draft.events.some((item) => item.id !== "birth")} onClick={() => { if (window.confirm("「誕生」以外の出来事をすべて削除しますか？")) setDraft({ ...draft, events: draft.events.filter((item) => item.id === "birth") }); }}><Trash2 size={16} />クリア</button></div>
-    <button className="button primary full" onClick={() => { onChange(draft); onClose(); }}>設定を保存</button>
+    <button className="button primary full" disabled={!isDirty} onClick={() => { onTheme(draftTheme); onChange(draft); }}>設定を保存</button>
   </aside></div>;
 }
 
