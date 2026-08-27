@@ -183,3 +183,16 @@ main { width: min(1420px, calc(100% - 48px)); margin: 0 auto; padding: 20px 0 32
   .site-footer { width: calc(100% - 28px); min-height: auto; flex-direction: column; align-items: flex-start; gap: 14px; padding: 20px 0 26px; }.site-footer nav { width: 100%; gap: 12px 18px; flex-wrap: wrap; }.site-footer > span { white-space: normal; }.static-main { width: calc(100% - 32px); padding: 44px 0 64px; }
   .shared-graph-context { min-width: 0; }.shared-title-tab { max-width: 84px; padding: 7px 6px; font-size: 10px; }.shared-title-tab::after { left: 6px; right: 6px; bottom: -14px; }.shared-view-status > span { display: none; }
 }
+
+.share-turnstile-wrap { display: flex; justify-content: center; min-height: 65px; margin: 4px 0; }
+.share-status-card { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 16px; padding: 60px 20px; min-height: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); }
+.share-status-card h2 { margin: 0; font-size: 20px; font-weight: 700; color: var(--text); }
+.share-status-card p { margin: 0; color: var(--text-soft); font-size: 14px; max-width: 420px; line-height: 1.6; }
+.share-spinner { width: 36px; height: 36px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.share-error-text { color: var(--danger); font-size: 12px; font-weight: 600; text-align: center; margin: 0; }
+.share-manage-section { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.share-manage-section h3 { margin: 0; font-size: 12px; color: var(--text-soft); }
+.share-history-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.share-history-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+

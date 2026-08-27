@@ -1,9 +1,29 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "my-life-chart",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-08-27",
   "assets": {
     "directory": "./dist",
-    "not_found_handling": "single-page-application"
-  }
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "my-life-chart-shares",
+      "database_id": "6d33f009-45b7-4d46-9b9e-fe53303a21a2",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "SHARE_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 5,
+        "period": 60
+      }
+    }
+  ]
 }

@@ -15,6 +15,7 @@ import {
 } from "date-fns";
 import { ja } from "date-fns/locale";
 import {
+  AlertCircle,
   CalendarDays,
   Check,
   CircleHelp,
@@ -23,11 +24,13 @@ import {
   FileUp,
   Link,
   List,
+  Loader2,
   Moon,
   MoreHorizontal,
   Pencil,
   Plus,
   Redo2,
+  RefreshCw,
   Settings,
   Share2,
   Sun,
@@ -35,7 +38,6 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import LZString from "lz-string";
 import { DayPicker } from "@daypicker/react";
 import "@daypicker/react/style.css";
 import {
@@ -50,6 +52,35 @@ import {
   useState,
 } from "react";
 import { z } from "zod";
+
+declare global {
+  interface Window {
+    turnstile?: {
+      render: (
+        container: string | HTMLElement,
+        options: {
+          sitekey: string;
+          callback?: (token: string) => void;
+          "error-callback"?: () => void;
+          "expired-callback"?: () => void;
+          theme?: "light" | "dark" | "auto";
+        }
+      ) => string;
+      reset: (widgetId?: string) => void;
+      remove: (widgetId?: string) => void;
+    };
+  }
+}
+
+const TURNSTILE_SITE_KEY = "0x4AAAAAAEdyhOrYRax-xbFO";
+const MY_SHARES_KEY = "jinsei-graph:my-shares";
+
+type MyShareItem = {
+  id: string;
+  deleteToken: string;
+  title: string;
+  createdAt: string;
+};
 
 type Theme = "auto" | "light" | "dark";
 type Mode = "lifetime" | "year" | "custom";
@@ -94,6 +125,11 @@ function modeFromPath(pathname = window.location.pathname): Mode {
 
 function isViewPath(pathname = window.location.pathname) {
   return pathname.split("/").filter(Boolean).at(-1) === "view";
+}
+
+function shareIdFromPath(pathname = window.location.pathname): string | null {
+  const match = pathname.match(/^\/s\/([A-Za-z0-9_-]+)/);
+  return match ? match[1] : null;
 }
 
 function staticPageFromPath(pathname = window.location.pathname): StaticPage | null {
@@ -610,19 +646,15 @@ function getScoreAtTime(events: TimelineEvent[], date: Date): number {
 
 function App() {
   const staticPage = staticPageFromPath();
-  const sharedDocument = useMemo(() => {
-    if (!location.hash.startsWith("#share=")) return null;
-    try {
-      const decoded = LZString.decompressFromEncodedURIComponent(location.hash.slice(7));
-      return documentSchema.parse(JSON.parse(decoded));
-    } catch {
-      return null;
-    }
-  }, []);
+  const [shareId, setShareId] = useState<string | null>(() => shareIdFromPath());
+  const [shareFetchState, setShareFetchState] = useState<{
+    status: "idle" | "loading" | "success" | "error" | "not_found";
+    error?: string;
+  }>(() => (shareIdFromPath() ? { status: "loading" } : { status: "idle" }));
 
   const [doc, setDoc] = useState<TimelineDocument>(() => {
-    const mode = sharedDocument?.mode ?? modeFromPath();
-    return sharedDocument ? withMode(sharedDocument, mode) : loadDocument(mode);
+    const mode = modeFromPath();
+    return loadDocument(mode);
   });
   const [history, setHistory] = useState<TimelineDocument[]>([]);
   const [future, setFuture] = useState<TimelineDocument[]>([]);
@@ -652,11 +684,58 @@ function App() {
   const eventDragStartRef = useRef<{ x: number; y: number } | null>(null);
   const eventDragMovedRef = useRef(false);
   const [isPanning, setIsPanning] = useState(false);
-  const readOnly = Boolean(sharedDocument) || isViewPath();
+  const readOnly = Boolean(shareId) || isViewPath();
   const needsBirth = doc.mode === "lifetime" && !doc.birth;
   const needsPeriod = doc.mode === "custom" && (!doc.range.start || !doc.range.end);
   const needsSetup = needsBirth || needsPeriod;
   const effectiveTheme = theme === "auto" ? systemTheme() : theme;
+
+  const fetchShare = useCallback(async (id: string) => {
+    setShareFetchState({ status: "loading" });
+    try {
+      const res = await fetch(`/api/shares/${id}`);
+      if (res.status === 404) {
+        setShareFetchState({ status: "not_found" });
+        return;
+      }
+      if (!res.ok) {
+        setShareFetchState({ status: "error", error: "共有データを読み込めませんでした" });
+        return;
+      }
+      const data = (await res.json()) as { document: unknown };
+      const parsed = documentSchema.parse(data.document);
+      setDoc(parsed);
+      setView(getFullRange(parsed));
+      setShareFetchState({ status: "success" });
+    } catch {
+      setShareFetchState({ status: "error", error: "共有データの読み込みに失敗しました" });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (shareId) {
+      fetchShare(shareId);
+    }
+  }, [shareId, fetchShare]);
+
+  useEffect(() => {
+    if (shareId) {
+      let meta = document.querySelector('meta[name="robots"]') as HTMLMetaElement | null;
+      let created = false;
+      if (!meta) {
+        meta = document.createElement("meta");
+        meta.name = "robots";
+        document.head.appendChild(meta);
+        created = true;
+      }
+      meta.content = "noindex,nofollow";
+      return () => {
+        if (created && meta?.parentNode) {
+          meta.parentNode.removeChild(meta);
+        }
+      };
+    }
+  }, [shareId]);
 
   const cycleTheme = () => {
     if (theme === "auto") {
@@ -718,16 +797,23 @@ function App() {
     }
 
     const handlePopState = () => {
-      const mode = modeFromPath();
-      const next = sharedDocument ? withMode(sharedDocument, mode) : loadDocument(mode);
-      setDoc(next);
-      setView(getFullRange(next));
+      const newShareId = shareIdFromPath();
+      setShareId(newShareId);
+      if (newShareId) {
+        fetchShare(newShareId);
+      } else {
+        const mode = modeFromPath();
+        const next = loadDocument(mode);
+        setDoc(next);
+        setView(getFullRange(next));
+        setShareFetchState({ status: "idle" });
+      }
       setHistory([]);
       setFuture([]);
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [sharedDocument]);
+  }, [doc.mode, fetchShare]);
 
   useEffect(() => {
     if (!hoveredEvents.length || !eventPreviewsRef.current) return;
@@ -880,18 +966,6 @@ function App() {
     setHistory((items) => [...items, doc].slice(-20));
     setFuture((items) => items.slice(1));
     setDoc(next);
-  };
-
-  const copyShareLink = async () => {
-    const sharedGraph = { ...doc, title: doc.title };
-    const payload = LZString.compressToEncodedURIComponent(JSON.stringify(sharedGraph));
-    const url = `${location.origin}${modePath(doc.mode, true)}#share=${payload}`;
-    if (url.length > 12000) {
-      setToast("リンクが長すぎます。JSONか画像をご利用ください");
-      return;
-    }
-    await navigator.clipboard.writeText(url);
-    setToast("共有リンクをコピーしました");
   };
 
   const exportJson = () => downloadBlob(new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" }), "jinsei-graph.json");
@@ -1105,7 +1179,7 @@ function App() {
           </div>}
         </div>
         <div className="top-actions">
-          {sharedDocument && <div className="shared-view-status">
+          {shareId && <div className="shared-view-status">
             <span>共有された人生グラフを見ています</span>
           </div>}
           {!readOnly && <>
@@ -1116,228 +1190,262 @@ function App() {
             {theme === "auto" ? <span className="auto-theme">A</span> : theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
           </IconButton>
           {!readOnly && <button className="button secondary compact" onClick={() => setSettingsOpen(true)}><Settings size={14} /><span>設定</span></button>}
-          <button className="button primary compact" onClick={() => setShareOpen(true)}><Share2 size={14} /><span>共有</span></button>
+          {!shareId && <button className="button primary compact" onClick={() => setShareOpen(true)}><Share2 size={14} /><span>共有</span></button>}
+          {shareId && <a href="/life" className="button primary compact"><Plus size={14} /><span>新しく作る</span></a>}
         </div>
       </header>
 
       <main>
-        <section className="hero-row">
-          <div>
-            {readOnly ? <h1 className="readonly-graph-title">{doc.title}</h1> : <div className="title-editor">
-              <input ref={titleRef} className="title-input" aria-label={doc.mode === "lifetime" ? "名前" : "グラフのタイトル"} value={doc.mode === "lifetime" ? lifetimeName(doc.title) : doc.title} readOnly={readOnly} maxLength={doc.mode === "lifetime" ? 40 : 60} style={{ width: `${Math.max(2, [...(doc.mode === "lifetime" ? lifetimeName(doc.title) : doc.title)].length + 0.15)}em` }} onChange={(event) => updateDoc((current) => ({ ...current, title: current.mode === "lifetime" ? lifetimeTitle(event.target.value) : event.target.value }))} />
-              {doc.mode === "lifetime" && <span className="lifetime-title-suffix">{LIFE_TITLE_SUFFIX}</span>}
-            </div>}
-            {doc.mode === "lifetime" && doc.birth && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
-              <label><DatePickerField value={doc.birth} onChange={changeBirthDate} readOnly={readOnly} compact label="生年月日" maxDate={today} /><span>生まれ</span></label>
-              <span className="quick-divider">·</span>
-              <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
-            </div>}
-            {doc.mode === "year" && <div className="quick-period-settings" aria-label="一年モードの期間設定">
-              <label><input aria-label="表示する年" type="number" min="1" max="9999" value={doc.displayYear} readOnly={readOnly} onChange={(e) => changeYearSettings(Number(e.target.value), doc.yearStartMonth)} /><span>年</span></label>
-              <label><select aria-label="開始月" value={doc.yearStartMonth} disabled={readOnly} onChange={(e) => changeYearSettings(doc.displayYear, Number(e.target.value))}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}月</option>)}</select><span>始まり</span></label>
-            </div>}
-            {doc.mode === "custom" && !needsPeriod && <div className="quick-period-settings custom-period-settings" aria-label="期間モードの期間設定">
-              <label><span>開始</span><DatePickerField value={doc.range.start} onChange={(value) => changeCustomRange("start", value)} readOnly={readOnly} compact label="開始日" /></label>
-              <span className="quick-divider">—</span>
-              <label><span>終了</span><DatePickerField value={doc.range.end} onChange={(value) => changeCustomRange("end", value)} readOnly={readOnly} compact label="終了日" /></label>
-            </div>}
+        {shareId && shareFetchState.status === "loading" && (
+          <div className="share-status-card">
+            <div className="share-spinner" />
+            <h2>人生グラフを読み込み中...</h2>
+            <p>共有されたデータを取得しています。</p>
           </div>
-        </section>
+        )}
 
-        <section className={`graph-card ${needsSetup ? "needs-setup" : ""}`} aria-label="人生グラフ">
-          <div className="graph-toolbar">
-            <div className="date-window"><CalendarDays size={16} /><span>{formatRange(view[0], view[1])}</span><span className="unit-pill">{unitLabel}表示</span></div>
-            {!readOnly && <div className="precision-control"><span>記録単位</span><div>{([['year', '年'], ['quarter', '四半期'], ['month', '月'], ['day', '日']] as const).map(([value, text]) => <button key={value} disabled={needsSetup} className={doc.inputPrecision === value ? "active" : ""} onClick={() => updateDoc((current) => ({ ...current, inputPrecision: value, events: current.events.map((item) => item.id === "birth" ? item : { ...item, datePrecision: value }) }), false)}>{text}</button>)}</div></div>}
-            {!readOnly && !needsPeriod && <button className="button primary compact toolbar-add-event" disabled={needsBirth} onClick={() => openNewEvent()}><Plus size={16} />出来事を追加</button>}
+        {shareId && shareFetchState.status === "not_found" && (
+          <div className="share-status-card">
+            <AlertCircle size={44} color="var(--negative)" />
+            <h2>共有リンクが見つかりません</h2>
+            <p>この共有リンクは削除されたか、URLが正しくない可能性があります。</p>
+            <a href="/life" className="button primary">新しく人生グラフを作成する</a>
           </div>
+        )}
 
-          <div className={`graph-wrap ${needsSetup ? "awaiting-setup" : ""}`} ref={graphWrapRef}>
-            <svg
-              ref={svgRef}
-              className={`graph ${isPanning ? "is-panning" : ""}`}
-              viewBox={`0 0 ${width} ${GRAPH_HEIGHT}`}
-              role="img"
-              aria-label={`${doc.title}。${doc.events.length}件の出来事があります`}
-              onDoubleClick={(event: ReactMouseEvent<SVGSVGElement>) => {
-                if (suppressDoubleClickRef.current) return;
-                const point = pointerFromEvent(event.clientX, event.clientY);
-                openNewEvent(point.date, point.score);
-              }}
-              onPointerDown={(event) => {
-                if (event.button !== 0 || (event.target as Element).closest(".event-node")) return;
-                panStartRef.current = { pointerId: event.pointerId, clientX: event.clientX, view: [view[0].getTime(), view[1].getTime()] };
-                event.currentTarget.setPointerCapture(event.pointerId);
-              }}
-              onPointerMove={onGraphMove}
-              onPointerLeave={() => { setPointer(null); if (hoverOriginRef.current === "graph") setHoveredEvents([]); }}
-              onPointerUp={(event) => {
-                if (panStartRef.current) {
-                  panStartRef.current = null;
-                  setIsPanning(false);
-                  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-                  window.setTimeout(() => { suppressDoubleClickRef.current = false; }, 280);
-                }
-                if (dragging) {
-                  const wasMoved = eventDragMovedRef.current;
-                  const tappedEvent = doc.events.find((item) => item.id === dragging);
-                  if (wasMoved && dragStartRef.current) {
-                    setHistory((items) => [...items, dragStartRef.current!].slice(-20));
-                    setFuture([]);
-                  } else if (tappedEvent && event.pointerType !== "mouse") {
-                    setModal({ open: true, event: tappedEvent });
-                  }
-                  dragStartRef.current = null;
-                  eventDragStartRef.current = null;
-                  setDragging(null);
-                  window.setTimeout(() => { eventDragMovedRef.current = false; }, 360);
-                }
-              }}
-            >
-              <defs>
-                <linearGradient id="lineGradient" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom}>
-                  <stop offset="0%" stopColor="var(--positive)" />
-                  <stop offset="42%" stopColor="var(--positive)" />
-                  <stop offset="49%" stopColor="var(--zero)" />
-                  <stop offset="51%" stopColor="var(--zero)" />
-                  <stop offset="58%" stopColor="var(--negative)" />
-                  <stop offset="100%" stopColor="var(--negative)" />
-                </linearGradient>
-              </defs>
-              <rect className="graph-bg" x="0" y="0" width={width} height={GRAPH_HEIGHT} rx="11" />
-              {[-100, -75, -50, -25, 0, 25, 50, 75, 100].map((score) => (
-                <g key={score}>
-                  <line className={score === 0 ? "zero-line" : "grid-line"} x1={MARGIN.left} x2={width - MARGIN.right} y1={yForScore(score)} y2={yForScore(score)} />
-                  <text className="y-label" x={MARGIN.left - 14} y={yForScore(score) + 4} textAnchor="end">{score > 0 ? `+${score}` : score}</text>
-                </g>
-              ))}
-              <text className="axis-caption" x={14} y={22}>スコア</text>
-              {ticks.map((tick) => {
-                const label = formatTick(tick, unit, doc);
-                return <g key={tick.toISOString()}>
-                  <line className="x-grid-line" x1={xForDate(tick)} x2={xForDate(tick)} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
-                  <text className="x-label" x={xForDate(tick)} y={GRAPH_HEIGHT - 43} textAnchor="middle">{label.primary}</text>
-                  {label.secondary && <text className="x-sub-label" x={xForDate(tick)} y={GRAPH_HEIGHT - 24} textAnchor="middle">{label.secondary}</text>}
-                </g>;
-              })}
-              <path className="life-line" d={linePath} />
+        {shareId && shareFetchState.status === "error" && (
+          <div className="share-status-card">
+            <AlertCircle size={44} color="var(--danger)" />
+            <h2>読み込みエラー</h2>
+            <p>{shareFetchState.error || "データの取得中にエラーが発生しました。"}</p>
+            <button className="button primary" onClick={() => shareId && fetchShare(shareId)}>
+              <RefreshCw size={15} />
+              再試行する
+            </button>
+          </div>
+        )}
 
-              {visibleEvents.map((event, index) => {
-                const date = safeDate(event.occurredAt);
-                const x = xForDate(date);
-                const y = yForScore(event.score);
-                const above = eventLabelIsAbove(event.score, y);
-                const labelY = y + (above ? -30 : 34);
-                const nearLeft = x < MARGIN.left + 55;
-                const labelX = nearLeft ? x + 9 : x;
-                const displayTitle = event.title.length > 16 ? `${event.title.slice(0, 15)}…` : event.title;
-                const titleWidth = Math.max(34, [...displayTitle].length * 10 + 14);
-                const titleX = nearLeft ? labelX - 6 : labelX - titleWidth / 2;
-                return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onDoubleClick={(e) => { e.stopPropagation(); if (!eventDragMovedRef.current) setModal({ open: true, event }); }} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
-                  <line className="event-stem" x1={x} x2={x} y1={y} y2={labelY + (above ? 8 : -14)} />
-                  <circle className="event-hit-area" cx={x} cy={y} r="14" fill="transparent" style={{ cursor: "grab" }} onPointerDown={(e) => { e.stopPropagation(); dragStartRef.current = doc; eventDragStartRef.current = { x: e.clientX, y: e.clientY }; eventDragMovedRef.current = false; setDragging(event.id); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); }} />
-                  <circle className={`event-dot ${eventTone(event.score)}`} cx={x} cy={y} r="7" style={{ pointerEvents: "none" }} />
-                  <rect className="event-title-bg" x={titleX} y={labelY - 14} width={titleWidth} height="20" rx="5" />
-                  <text className="event-title" x={labelX} y={labelY} textAnchor={nearLeft ? "start" : "middle"}>{displayTitle}</text>
-                  {index === visibleEvents.length - 1 && <title>{event.title}</title>}
-                </g>;
-              })}
+        {(!shareId || shareFetchState.status === "success") && (
+          <>
+            <section className="hero-row">
+              <div>
+                {readOnly ? <h1 className="readonly-graph-title">{doc.title}</h1> : <div className="title-editor">
+                  <input ref={titleRef} className="title-input" aria-label={doc.mode === "lifetime" ? "名前" : "グラフのタイトル"} value={doc.mode === "lifetime" ? lifetimeName(doc.title) : doc.title} readOnly={readOnly} maxLength={doc.mode === "lifetime" ? 40 : 60} style={{ width: `${Math.max(2, [...(doc.mode === "lifetime" ? lifetimeName(doc.title) : doc.title)].length + 0.15)}em` }} onChange={(event) => updateDoc((current) => ({ ...current, title: current.mode === "lifetime" ? lifetimeTitle(event.target.value) : event.target.value }))} />
+                  {doc.mode === "lifetime" && <span className="lifetime-title-suffix">{LIFE_TITLE_SUFFIX}</span>}
+                </div>}
+                {doc.mode === "lifetime" && doc.birth && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
+                  <label><DatePickerField value={doc.birth} onChange={changeBirthDate} readOnly={readOnly} compact label="生年月日" maxDate={today} /><span>生まれ</span></label>
+                  <span className="quick-divider">·</span>
+                  <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
+                </div>}
+                {doc.mode === "year" && <div className="quick-period-settings" aria-label="一年モードの期間設定">
+                  <label><input aria-label="表示する年" type="number" min="1" max="9999" value={doc.displayYear} readOnly={readOnly} onChange={(e) => changeYearSettings(Number(e.target.value), doc.yearStartMonth)} /><span>年</span></label>
+                  <label><select aria-label="開始月" value={doc.yearStartMonth} disabled={readOnly} onChange={(e) => changeYearSettings(doc.displayYear, Number(e.target.value))}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}月</option>)}</select><span>始まり</span></label>
+                </div>}
+                {doc.mode === "custom" && !needsPeriod && <div className="quick-period-settings custom-period-settings" aria-label="期間モードの期間設定">
+                  <label><span>開始</span><DatePickerField value={doc.range.start} onChange={(value) => changeCustomRange("start", value)} readOnly={readOnly} compact label="開始日" /></label>
+                  <span className="quick-divider">—</span>
+                  <label><span>終了</span><DatePickerField value={doc.range.end} onChange={(value) => changeCustomRange("end", value)} readOnly={readOnly} compact label="終了日" /></label>
+                </div>}
+              </div>
+            </section>
 
-              {hoveredEvent && !dragging && (() => {
-                const x = xForDate(safeDate(hoveredEvent.occurredAt));
-                const y = yForScore(hoveredEvent.score);
-                const title = hoveredEvent.title.length > 20 ? `${hoveredEvent.title.slice(0, 19)}…` : hoveredEvent.title;
-                const dateLabel = eventDateLabel(hoveredEvent, doc, unit);
-                const summary = hoveredEvent.description.trim();
-                const titleFont = 15;
-                const dateFont = 13;
-                const summaryFont = 11;
-                const summaryLines = summary ? wrapPopoverText(summary, 240, summaryFont, 4) : [];
-                const titleW = approximateTextWidth(title, titleFont);
-                const dateW = approximateTextWidth(dateLabel, dateFont);
-                const summaryW = summaryLines.reduce((max, line) => Math.max(max, approximateTextWidth(line, summaryFont)), 0);
-                const maxTextW = Math.max(titleW, dateW, summaryW);
-                const paddingX = 18;
-                const popupWidth = clamp(Math.ceil(maxTextW + paddingX), 60, 272);
-                const popupHeight = summaryLines.length ? 57 + summaryLines.length * 15 : 58;
-                const preferRight = x + popupWidth + 18 <= width - MARGIN.right;
-                const popupX = preferRight ? x + 16 : Math.max(MARGIN.left, x - popupWidth - 16);
-                const popupY = clamp(y - popupHeight / 2, MARGIN.top + 4, GRAPH_HEIGHT - MARGIN.bottom - popupHeight - 4);
+            <section className={`graph-card ${needsSetup ? "needs-setup" : ""}`} aria-label="人生グラフ">
+              <div className="graph-toolbar">
+                <div className="date-window"><CalendarDays size={16} /><span>{formatRange(view[0], view[1])}</span><span className="unit-pill">{unitLabel}表示</span></div>
+                {!readOnly && <div className="precision-control"><span>記録単位</span><div>{([['year', '年'], ['quarter', '四半期'], ['month', '月'], ['day', '日']] as const).map(([value, text]) => <button key={value} disabled={needsSetup} className={doc.inputPrecision === value ? "active" : ""} onClick={() => updateDoc((current) => ({ ...current, inputPrecision: value, events: current.events.map((item) => item.id === "birth" ? item : { ...item, datePrecision: value }) }), false)}>{text}</button>)}</div></div>}
+                {!readOnly && !needsPeriod && <button className="button primary compact toolbar-add-event" disabled={needsBirth} onClick={() => openNewEvent()}><Plus size={16} />出来事を追加</button>}
+              </div>
 
-                return <g className="event-popover" pointerEvents="none" transform={`translate(${popupX},${popupY})`}>
-                  <rect width={popupWidth} height={popupHeight} rx="10" />
-                  <text className="event-popover-title" x="12" y="23">{title}</text>
-                  <text className="event-popover-date" x="12" y="44">{dateLabel}</text>
-                  {summaryLines.length > 0 && <text className="event-popover-summary">{summaryLines.map((line, index) => <tspan key={`${index}-${line}`} x="12" y={64 + index * 15}>{line}</tspan>)}</text>}
-                </g>;
-              })()}
-
-              {pointer && !hoveredEvent && !dragging && pointer.x >= MARGIN.left && pointer.x <= width - MARGIN.right && pointer.y >= MARGIN.top && pointer.y <= GRAPH_HEIGHT - MARGIN.bottom && (
-                <g className="crosshair" pointerEvents="none">
-                  <line x1={pointer.x} x2={pointer.x} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
-                  <line x1={MARGIN.left} x2={width - MARGIN.right} y1={pointer.y} y2={pointer.y} />
-                  {(() => {
-                    const label = doc.inputPrecision === "year" && unit !== "quarter" ? (doc.mode === "lifetime" ? `${differenceInYears(pointer.date, safeDate(doc.birth))}歳 · ${format(pointer.date, "yyyy年")}` : format(pointer.date, "yyyy年")) : doc.inputPrecision === "quarter" || unit === "quarter" ? (doc.mode === "lifetime" ? `${differenceInYears(pointer.date, safeDate(doc.birth))}歳 · ${format(pointer.date, "yyyy年")} ${getQuarterSeasonName(pointer.date.getMonth())}` : `${format(pointer.date, "yyyy年")} ${getQuarterSeasonName(pointer.date.getMonth())}`) : doc.inputPrecision === "month" ? format(pointer.date, "yyyy年M月") : format(pointer.date, "yyyy/M/d");
-                    const labelFont = 15;
-                    let textW = 0;
-                    for (const char of label) {
-                      textW += char.charCodeAt(0) > 255 ? labelFont : labelFont * 0.58;
+              <div className={`graph-wrap ${needsSetup ? "awaiting-setup" : ""}`} ref={graphWrapRef}>
+                <svg
+                  ref={svgRef}
+                  className={`graph ${isPanning ? "is-panning" : ""}`}
+                  viewBox={`0 0 ${width} ${GRAPH_HEIGHT}`}
+                  role="img"
+                  aria-label={`${doc.title}。${doc.events.length}件の出来事があります`}
+                  onDoubleClick={(event: ReactMouseEvent<SVGSVGElement>) => {
+                    if (suppressDoubleClickRef.current) return;
+                    const point = pointerFromEvent(event.clientX, event.clientY);
+                    openNewEvent(point.date, point.score);
+                  }}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0 || (event.target as Element).closest(".event-node")) return;
+                    panStartRef.current = { pointerId: event.pointerId, clientX: event.clientX, view: [view[0].getTime(), view[1].getTime()] };
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                  }}
+                  onPointerMove={onGraphMove}
+                  onPointerLeave={() => { setPointer(null); if (hoverOriginRef.current === "graph") setHoveredEvents([]); }}
+                  onPointerUp={(event) => {
+                    if (panStartRef.current) {
+                      panStartRef.current = null;
+                      setIsPanning(false);
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                      window.setTimeout(() => { suppressDoubleClickRef.current = false; }, 280);
                     }
-                    const popupWidth = clamp(Math.ceil(textW + 16), 48, 224);
-                    const popupX = pointer.x + popupWidth + 12 <= width - MARGIN.right
-                      ? pointer.x + 9
-                      : pointer.x - popupWidth - 9;
-                    return <g transform={`translate(${clamp(popupX, MARGIN.left, width - MARGIN.right - popupWidth)},${clamp(pointer.y - 48, MARGIN.top, GRAPH_HEIGHT - MARGIN.bottom - 38)})`}><rect width={popupWidth} height="38" rx="9" /><text x="8" y="25">{label}</text></g>;
+                    if (dragging) {
+                      const wasMoved = eventDragMovedRef.current;
+                      const tappedEvent = doc.events.find((item) => item.id === dragging);
+                      if (wasMoved && dragStartRef.current) {
+                        setHistory((items) => [...items, dragStartRef.current!].slice(-20));
+                        setFuture([]);
+                      } else if (tappedEvent && event.pointerType !== "mouse") {
+                        setModal({ open: true, event: tappedEvent });
+                      }
+                      dragStartRef.current = null;
+                      eventDragStartRef.current = null;
+                      setDragging(null);
+                      window.setTimeout(() => { eventDragMovedRef.current = false; }, 360);
+                    }
+                  }}
+                >
+                  <defs>
+                    <linearGradient id="lineGradient" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom}>
+                      <stop offset="0%" stopColor="var(--positive)" />
+                      <stop offset="42%" stopColor="var(--positive)" />
+                      <stop offset="49%" stopColor="var(--zero)" />
+                      <stop offset="51%" stopColor="var(--zero)" />
+                      <stop offset="58%" stopColor="var(--negative)" />
+                      <stop offset="100%" stopColor="var(--negative)" />
+                    </linearGradient>
+                  </defs>
+                  <rect className="graph-bg" x="0" y="0" width={width} height={GRAPH_HEIGHT} rx="11" />
+                  {[-100, -75, -50, -25, 0, 25, 50, 75, 100].map((score) => (
+                    <g key={score}>
+                      <line className={score === 0 ? "zero-line" : "grid-line"} x1={MARGIN.left} x2={width - MARGIN.right} y1={yForScore(score)} y2={yForScore(score)} />
+                      <text className="y-label" x={MARGIN.left - 14} y={yForScore(score) + 4} textAnchor="end">{score > 0 ? `+${score}` : score}</text>
+                    </g>
+                  ))}
+                  <text className="axis-caption" x={14} y={22}>スコア</text>
+                  {ticks.map((tick) => {
+                    const label = formatTick(tick, unit, doc);
+                    return <g key={tick.toISOString()}>
+                      <line className="x-grid-line" x1={xForDate(tick)} x2={xForDate(tick)} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
+                      <text className="x-label" x={xForDate(tick)} y={GRAPH_HEIGHT - 43} textAnchor="middle">{label.primary}</text>
+                      {label.secondary && <text className="x-sub-label" x={xForDate(tick)} y={GRAPH_HEIGHT - 24} textAnchor="middle">{label.secondary}</text>}
+                    </g>;
+                  })}
+                  <path className="life-line" d={linePath} />
+
+                  {visibleEvents.map((event, index) => {
+                    const date = safeDate(event.occurredAt);
+                    const x = xForDate(date);
+                    const y = yForScore(event.score);
+                    const above = eventLabelIsAbove(event.score, y);
+                    const labelY = y + (above ? -30 : 34);
+                    const nearLeft = x < MARGIN.left + 55;
+                    const labelX = nearLeft ? x + 9 : x;
+                    const displayTitle = event.title.length > 16 ? `${event.title.slice(0, 15)}…` : event.title;
+                    const titleWidth = Math.max(34, [...displayTitle].length * 10 + 14);
+                    const titleX = nearLeft ? labelX - 6 : labelX - titleWidth / 2;
+                    return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onDoubleClick={(e) => { e.stopPropagation(); if (!eventDragMovedRef.current) setModal({ open: true, event }); }} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
+                      <line className="event-stem" x1={x} x2={x} y1={y} y2={labelY + (above ? 8 : -14)} />
+                      <circle className="event-hit-area" cx={x} cy={y} r="14" fill="transparent" style={{ cursor: "grab" }} onPointerDown={(e) => { e.stopPropagation(); dragStartRef.current = doc; eventDragStartRef.current = { x: e.clientX, y: e.clientY }; eventDragMovedRef.current = false; setDragging(event.id); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); }} />
+                      <circle className={`event-dot ${eventTone(event.score)}`} cx={x} cy={y} r="7" style={{ pointerEvents: "none" }} />
+                      <rect className="event-title-bg" x={titleX} y={labelY - 14} width={titleWidth} height="20" rx="5" />
+                      <text className="event-title" x={labelX} y={labelY} textAnchor={nearLeft ? "start" : "middle"}>{displayTitle}</text>
+                      {index === visibleEvents.length - 1 && <title>{event.title}</title>}
+                    </g>;
+                  })}
+
+                  {hoveredEvent && !dragging && (() => {
+                    const x = xForDate(safeDate(hoveredEvent.occurredAt));
+                    const y = yForScore(hoveredEvent.score);
+                    const title = hoveredEvent.title.length > 20 ? `${hoveredEvent.title.slice(0, 19)}…` : hoveredEvent.title;
+                    const dateLabel = eventDateLabel(hoveredEvent, doc, unit);
+                    const summary = hoveredEvent.description.trim();
+                    const titleFont = 15;
+                    const dateFont = 13;
+                    const summaryFont = 11;
+                    const summaryLines = summary ? wrapPopoverText(summary, 240, summaryFont, 4) : [];
+                    const titleW = approximateTextWidth(title, titleFont);
+                    const dateW = approximateTextWidth(dateLabel, dateFont);
+                    const summaryW = summaryLines.reduce((max, line) => Math.max(max, approximateTextWidth(line, summaryFont)), 0);
+                    const maxTextW = Math.max(titleW, dateW, summaryW);
+                    const paddingX = 18;
+                    const popupWidth = clamp(Math.ceil(maxTextW + paddingX), 60, 272);
+                    const popupHeight = summaryLines.length ? 57 + summaryLines.length * 15 : 58;
+                    const preferRight = x + popupWidth + 18 <= width - MARGIN.right;
+                    const popupX = preferRight ? x + 16 : Math.max(MARGIN.left, x - popupWidth - 16);
+                    const popupY = clamp(y - popupHeight / 2, MARGIN.top + 4, GRAPH_HEIGHT - MARGIN.bottom - popupHeight - 4);
+
+                    return <g className="event-popover" pointerEvents="none" transform={`translate(${popupX},${popupY})`}>
+                      <rect width={popupWidth} height={popupHeight} rx="10" />
+                      <text className="event-popover-title" x="12" y="23">{title}</text>
+                      <text className="event-popover-date" x="12" y="44">{dateLabel}</text>
+                      {summaryLines.length > 0 && <text className="event-popover-summary">{summaryLines.map((line, index) => <tspan key={`${index}-${line}`} x="12" y={64 + index * 15}>{line}</tspan>)}</text>}
+                    </g>;
                   })()}
-                </g>
-              )}
 
-              {dragging && (() => {
-                const draggingEvent = doc.events.find((e) => e.id === dragging);
-                if (!draggingEvent) return null;
-                const dragX = xForDate(safeDate(draggingEvent.occurredAt));
-                const dragY = yForScore(draggingEvent.score);
-                const scoreText = draggingEvent.score > 0 ? `+${draggingEvent.score}` : `${draggingEvent.score}`;
-                const badgeWidth = scoreText.length > 3 ? 56 : 46;
-                const badgeHeight = 26;
+                  {pointer && !hoveredEvent && !dragging && pointer.x >= MARGIN.left && pointer.x <= width - MARGIN.right && pointer.y >= MARGIN.top && pointer.y <= GRAPH_HEIGHT - MARGIN.bottom && (
+                    <g className="crosshair" pointerEvents="none">
+                      <line x1={pointer.x} x2={pointer.x} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
+                      <line x1={MARGIN.left} x2={width - MARGIN.right} y1={pointer.y} y2={pointer.y} />
+                      {(() => {
+                        const label = doc.inputPrecision === "year" && unit !== "quarter" ? (doc.mode === "lifetime" ? `${differenceInYears(pointer.date, safeDate(doc.birth))}歳 · ${format(pointer.date, "yyyy年")}` : format(pointer.date, "yyyy年")) : doc.inputPrecision === "quarter" || unit === "quarter" ? (doc.mode === "lifetime" ? `${differenceInYears(pointer.date, safeDate(doc.birth))}歳 · ${format(pointer.date, "yyyy年")} ${getQuarterSeasonName(pointer.date.getMonth())}` : `${format(pointer.date, "yyyy年")} ${getQuarterSeasonName(pointer.date.getMonth())}`) : doc.inputPrecision === "month" ? format(pointer.date, "yyyy年M月") : format(pointer.date, "yyyy/M/d");
+                        const labelFont = 15;
+                        let textW = 0;
+                        for (const char of label) {
+                          textW += char.charCodeAt(0) > 255 ? labelFont : labelFont * 0.58;
+                        }
+                        const popupWidth = clamp(Math.ceil(textW + 16), 48, 224);
+                        const popupX = pointer.x + popupWidth + 12 <= width - MARGIN.right
+                          ? pointer.x + 9
+                          : pointer.x - popupWidth - 9;
+                        return <g transform={`translate(${clamp(popupX, MARGIN.left, width - MARGIN.right - popupWidth)},${clamp(pointer.y - 48, MARGIN.top, GRAPH_HEIGHT - MARGIN.bottom - 38)})`}><rect width={popupWidth} height="38" rx="9" /><text x="8" y="25">{label}</text></g>;
+                      })()}
+                    </g>
+                  )}
 
-                const fill = draggingEvent.score > 0 ? "var(--positive)" : draggingEvent.score < 0 ? "var(--negative)" : "var(--zero)";
+                  {dragging && (() => {
+                    const draggingEvent = doc.events.find((e) => e.id === dragging);
+                    if (!draggingEvent) return null;
+                    const dragX = xForDate(safeDate(draggingEvent.occurredAt));
+                    const dragY = yForScore(draggingEvent.score);
+                    const scoreText = draggingEvent.score > 0 ? `+${draggingEvent.score}` : `${draggingEvent.score}`;
+                    const badgeWidth = scoreText.length > 3 ? 56 : 46;
+                    const badgeHeight = 26;
 
-                const badgeX = clamp(dragX - badgeWidth / 2, MARGIN.left, width - MARGIN.right - badgeWidth);
-                const titleIsAbove = eventLabelIsAbove(draggingEvent.score, dragY);
-                const titleY = dragY + (titleIsAbove ? -30 : 34);
-                const gap = 6;
-                const badgeY = titleIsAbove
-                  ? titleY - 14 - gap - badgeHeight
-                  : titleY + 6 + gap;
+                    const fill = draggingEvent.score > 0 ? "var(--positive)" : draggingEvent.score < 0 ? "var(--negative)" : "var(--zero)";
 
-                return (
-                  <g className="dragging-score-bubble" pointerEvents="none" transform={`translate(${badgeX},${badgeY})`}>
-                    <rect width={badgeWidth} height={badgeHeight} rx="13" fill={fill} filter="drop-shadow(0 2px 6px rgba(0,0,0,0.25))" />
-                    <text x={badgeWidth / 2} y="17" fill="#ffffff" fontSize="12" fontWeight="700" textAnchor="middle">{scoreText}</text>
-                  </g>
-                );
-              })()}
-            </svg>
-            {needsBirth && <div className="birth-onboarding">
-              <strong>{readOnly ? "誕生日が設定されていません" : "誕生日を設定"}</strong>
-              {!readOnly && <DatePickerField value={doc.birth} onChange={changeBirthDate} label="誕生日" placeholder="生年月日" maxDate={today} />}
-            </div>}
-            {needsPeriod && <PeriodOnboarding readOnly={readOnly} onSubmit={initializeCustomRange} />}
-          </div>
+                    const badgeX = clamp(dragX - badgeWidth / 2, MARGIN.left, width - MARGIN.right - badgeWidth);
+                    const titleIsAbove = eventLabelIsAbove(draggingEvent.score, dragY);
+                    const titleY = dragY + (titleIsAbove ? -30 : 34);
+                    const gap = 6;
+                    const badgeY = titleIsAbove
+                      ? titleY - 14 - gap - badgeHeight
+                      : titleY + 6 + gap;
 
-        </section>
+                    return (
+                      <g className="dragging-score-bubble" pointerEvents="none" transform={`translate(${badgeX},${badgeY})`}>
+                        <rect width={badgeWidth} height={badgeHeight} rx="13" fill={fill} filter="drop-shadow(0 2px 6px rgba(0,0,0,0.25))" />
+                        <text x={badgeWidth / 2} y="17" fill="#ffffff" fontSize="12" fontWeight="700" textAnchor="middle">{scoreText}</text>
+                      </g>
+                    );
+                  })()}
+                </svg>
+                {needsBirth && <div className="birth-onboarding">
+                  <strong>{readOnly ? "誕生日が設定されていません" : "誕生日を設定"}</strong>
+                  {!readOnly && <DatePickerField value={doc.birth} onChange={changeBirthDate} label="誕生日" placeholder="生年月日" maxDate={today} />}
+                </div>}
+                {needsPeriod && <PeriodOnboarding readOnly={readOnly} onSubmit={initializeCustomRange} />}
+              </div>
 
-        <div className="section-header event-strip-header">
-          <h2 className="graph-title">人生年表</h2>
-          <button className="text-button" onClick={() => setEventsOpen(true)}><List size={17} />一覧を見る</button>
-        </div>
+            </section>
 
-        <section className="event-strip">
-          <div className="event-previews" ref={eventPreviewsRef}>
-            {[...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).map((event) => <button key={event.id} data-event-id={event.id} className={`${eventTone(event.score)} ${hoveredEventIds.has(event.id) ? "is-highlighted" : ""}`} onPointerEnter={() => { hoverOriginRef.current = "preview"; setHoveredEvents([event]); }} onPointerLeave={() => { hoverOriginRef.current = null; setHoveredEvents([]); }} onClick={() => setModal({ open: true, event })}><span>{eventDateLabel(event, doc)}</span>{event.title}</button>)}
-            {!doc.events.length && <span className="muted">まだ出来事はありません。</span>}
-          </div>
-        </section>
+            <div className="section-header event-strip-header">
+              <h2 className="graph-title">人生年表</h2>
+              <button className="text-button" onClick={() => setEventsOpen(true)}><List size={17} />一覧を見る</button>
+            </div>
+
+            <section className="event-strip">
+              <div className="event-previews" ref={eventPreviewsRef}>
+                {[...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).map((event) => <button key={event.id} data-event-id={event.id} className={`${eventTone(event.score)} ${hoveredEventIds.has(event.id) ? "is-highlighted" : ""}`} onPointerEnter={() => { hoverOriginRef.current = "preview"; setHoveredEvents([event]); }} onPointerLeave={() => { hoverOriginRef.current = null; setHoveredEvents([]); }} onClick={() => setModal({ open: true, event })}><span>{eventDateLabel(event, doc)}</span>{event.title}</button>)}
+                {!doc.events.length && <span className="muted">まだ出来事はありません。</span>}
+              </div>
+            </section>
+          </>
+        )}
       </main>
 
       <SiteFooter />
@@ -1345,7 +1453,7 @@ function App() {
       {modal.open && modal.event && <EventDialog event={modal.event} doc={doc} readOnly={readOnly} onClose={() => setModal({ open: false, event: null })} onSave={saveEvent} onDelete={deleteEvent} />}
       {settingsOpen && <SettingsPanel doc={doc} theme={theme} onTheme={setTheme} onClose={() => setSettingsOpen(false)} onChange={(next) => { updateDoc(() => next); setView(getFullRange(next)); }} />}
       {eventsOpen && <EventsPanel doc={doc} readOnly={readOnly} onClose={() => setEventsOpen(false)} onSelect={(event) => { setEventsOpen(false); setModal({ open: true, event }); }} onAdd={() => { setEventsOpen(false); openNewEvent(); }} />}
-      {shareOpen && <ShareDialog readOnly={readOnly} onClose={() => setShareOpen(false)} onLink={copyShareLink} onPng={exportPng} onJson={exportJson} onImport={() => importRef.current?.click()} />}
+      {shareOpen && <ShareDialog doc={doc} readOnly={readOnly} effectiveTheme={effectiveTheme} onClose={() => setShareOpen(false)} onPng={exportPng} onJson={exportJson} onImport={() => importRef.current?.click()} onToast={setToast} />}
       <input ref={importRef} className="sr-only" type="file" accept="application/json" onChange={importJson} />
       {toast && <div className="toast" role="status"><Check size={17} />{toast}</div>}
     </div>
@@ -1364,43 +1472,57 @@ function SiteFooter() {
 }
 
 function StaticPageContent({ page }: { page: StaticPage }) {
-  if (page === "about") return <article className="static-content">
-    <p className="eyebrow">ABOUT</p>
-    <h1>このサイトについて</h1>
-    <p>My Life Chartは、人生の出来事とそのときの気持ちを一本のグラフに記録し、自分の歩みを振り返るためのサービスです。</p>
-    <h2>グラフの種類</h2>
-    <p>人生全体を振り返る「人生グラフ」、一年を詳しく記録する「一年グラフ」、自由な開始日と終了日を設定できる「期間指定」を用意しています。</p>
-    <h2>記録と共有</h2>
-    <p>作成したグラフはこの端末のブラウザに保存されます。共有リンクを作成すると、リンクを知っている人に閲覧専用のグラフを共有できます。</p>
-  </article>;
+  if (page === "about") {
+    return (
+      <article className="static-content">
+        <p className="eyebrow">ABOUT</p>
+        <h1>このサイトについて</h1>
+        <p>My Life Chartは、人生の出来事とそのときの気持ちの起伏を一本のグラフに記録し、自分の歩みを振り返るためのサービスです。</p>
+        <h2>グラフの種類</h2>
+        <p>人生全体を振り返る「人生グラフ」、一年を詳しく記録する「一年グラフ」、自由な開始日と終了日を設定できる「期間指定」を用意しています。</p>
+        <h2>記録と共有</h2>
+        <p>普段の編集データはお使いのブラウザ（ローカル）に保存されます。共有リンクを作成した場合のみ、短縮リンク（/s/ID）を提供するためにグラフデータがCloudflare上に保存され、リンクを知っている人に閲覧専用のグラフを共有できます。</p>
+      </article>
+    );
+  }
 
-  if (page === "privacy-policy") return <article className="static-content">
-    <p className="eyebrow">PRIVACY POLICY</p>
-    <h1>プライバシーポリシー</h1>
-    <p>My Life Chartは、利用者の記録を大切に扱います。</p>
-    <h2>保存される情報</h2>
-    <p>入力したグラフ、出来事、設定は、原則として利用中のブラウザ内に保存されます。本サービスのデータベースへ自動的に送信・保存することはありません。</p>
-    <h2>共有リンク</h2>
-    <p>共有リンクにはグラフのデータが含まれます。リンクを知っている人は内容を閲覧できるため、個人情報や公開したくない情報の入力・共有にはご注意ください。</p>
-    <h2>外部サービス</h2>
-    <p>サイトの配信や安定した提供のため、ホスティング事業者がアクセス情報を取り扱う場合があります。その取扱いには各事業者の方針が適用されます。</p>
-    <h2>改定</h2>
-    <p>機能や運用方法の変更に応じて、本ポリシーを改定することがあります。</p>
-  </article>;
+  if (page === "privacy-policy") {
+    return (
+      <article className="static-content">
+        <p className="eyebrow">PRIVACY POLICY</p>
+        <h1>プライバシーポリシー</h1>
+        <p>My Life Chartは、利用者のプライバシーと記録を大切に扱います。</p>
+        <h2>保存される情報</h2>
+        <p>入力したグラフ、出来事、設定などの編集中データは、原則として利用中のブラウザ内（ローカルストレージ）に保存されます。共有操作を行わない限り、サーバーへ自動的に送信・保存されることはありません。</p>
+        <h2>共有リンクとデータ保存</h2>
+        <p>「共有」機能を使って短縮リンクを作成した場合に限り、共有されたグラフデータがCloudflare D1データベースへ送信・保存されます。推測困難なランダムIDを発行しますが、URLを知っている人は誰でも閲覧可能なため、個人情報や秘密にしておきたい情報の入力・共有にはご注意ください。</p>
+        <h2>スパム・不正利用対策（Turnstile）</h2>
+        <p>悪質なボットや不正アクセスからサービスを保護するため、Cloudflare Turnstileを導入しています。認証およびアクセス時にIPアドレス等の通信情報が一時的に処理される場合がありますが、これらをデータベースへ永続保存することはありません。</p>
+        <h2>データの削除と管理</h2>
+        <p>共有リンクを作成した端末には削除用トークンが保存され、作成者はいつでも共有データを削除できます。また、サービスの安定運用や無料枠維持のため、長期間アクセスがないデータや規約違反データを運営側で削除する場合があります。</p>
+        <h2>改定日</h2>
+        <p>2026年8月27日 改定</p>
+      </article>
+    );
+  }
 
-  return <article className="static-content">
-    <p className="eyebrow">TERMS OF USE</p>
-    <h1>利用規約</h1>
-    <p>本規約は、My Life Chartを利用する際の条件を定めるものです。サービスを利用した時点で、本規約に同意したものとみなします。</p>
-    <h2>利用上の注意</h2>
-    <p>法令または公序良俗に反する行為、第三者の権利を侵害する行為、サービスの運営を妨げる行為は禁止します。</p>
-    <h2>データの管理</h2>
-    <p>ブラウザのデータ削除や端末の変更により、保存したグラフが失われる場合があります。必要に応じてJSONの書き出し機能でバックアップしてください。</p>
-    <h2>免責事項</h2>
-    <p>本サービスは現状有姿で提供されます。利用または利用できなかったことによって生じた損害について、法令上認められる範囲で責任を負いません。</p>
-    <h2>サービスと規約の変更</h2>
-    <p>必要に応じて、事前の予告なくサービス内容または本規約を変更することがあります。</p>
-  </article>;
+  return (
+    <article className="static-content">
+      <p className="eyebrow">TERMS OF USE</p>
+      <h1>利用規約</h1>
+      <p>本規約は、My Life Chartを利用する際の条件を定めるものです。本サービスを利用した時点で、本規約に同意したものとみなします。</p>
+      <h2>利用上の注意</h2>
+      <p>法令または公序良俗に反する行為、第三者のプライバシー・著作権等を侵害する行為、サービスの運営を妨げる行為は禁止します。</p>
+      <h2>共有リンクの提供と制限</h2>
+      <p>本サービスの短縮URL共有機能は無料枠の範囲で運用されています。アクセス集中や利用枠超過、メンテナンス等により、予告なく共有リンクの作成が一時的に制限される場合があります。</p>
+      <h2>データの管理</h2>
+      <p>ブラウザのデータ削除や端末変更により、保存したグラフが失われる場合があります。必要に応じてJSON書き出しやPNG保存機能でバックアップを行ってください。</p>
+      <h2>免責事項</h2>
+      <p>本サービスは現状有姿で提供されます。サービスの変更、中断、終了、またはデータの喪失等によって利用者に生じた損害について、運営者は法令上認められる範囲で責任を負いません。</p>
+      <h2>施行・改定日</h2>
+      <p>2026年8月27日 改定</p>
+    </article>
+  );
 }
 
 function PeriodOnboarding({ readOnly, onSubmit }: { readOnly: boolean; onSubmit: (start: string, end: string) => void }) {
@@ -1479,11 +1601,265 @@ function EventsPanel({ doc, readOnly, onClose, onSelect, onAdd }: { doc: Timelin
   </aside></div>;
 }
 
-function ShareDialog({ readOnly, onClose, onLink, onPng, onJson, onImport }: { readOnly: boolean; onClose: () => void; onLink: () => void; onPng: () => void; onJson: () => void; onImport: () => void }) {
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="dialog share-dialog" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><h2>人生グラフを共有</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
-    <div className="share-options"><button onClick={onLink}><span className="share-icon accent"><Link size={22} /></span><span><strong>リンクをコピー</strong><small>データはリンクの中だけに保存されます</small></span></button><button onClick={onPng}><span className="share-icon coral"><Download size={22} /></span><span><strong>PNGで保存</strong></span></button><button onClick={onJson}><span className="share-icon blue"><FileDown size={22} /></span><span><strong>インポート</strong></span></button>{!readOnly && <button onClick={onImport}><span className="share-icon neutral"><FileUp size={22} /></span><span><strong>エクスポート</strong></span></button>}</div>
-    <p className="privacy-note">共有リンクを知っている人は内容を見ることができます。個人情報の入力にはご注意ください。</p>
-  </div></div>;
+function ShareDialog({
+  doc,
+  readOnly,
+  effectiveTheme,
+  onClose,
+  onPng,
+  onJson,
+  onImport,
+  onToast,
+}: {
+  doc: TimelineDocument;
+  readOnly: boolean;
+  effectiveTheme: "light" | "dark";
+  onClose: () => void;
+  onPng: () => void;
+  onJson: () => void;
+  onImport: () => void;
+  onToast: (msg: string) => void;
+}) {
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [myShares, setMyShares] = useState<MyShareItem[]>(() => {
+    try {
+      const saved = localStorage.getItem(MY_SHARES_KEY);
+      return saved ? (JSON.parse(saved) as MyShareItem[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const turnstileContainerRef = useRef<HTMLDivElement>(null);
+  const widgetIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let timer: number;
+    const initTurnstile = () => {
+      if (window.turnstile && turnstileContainerRef.current && !widgetIdRef.current) {
+        try {
+          widgetIdRef.current = window.turnstile.render(turnstileContainerRef.current, {
+            sitekey: TURNSTILE_SITE_KEY,
+            callback: (token: string) => {
+              setTurnstileToken(token);
+              setErrorMessage(null);
+            },
+            "error-callback": () => {
+              setErrorMessage("認証でエラーが発生しました。再試行してください。");
+            },
+            "expired-callback": () => {
+              setTurnstileToken(null);
+            },
+            theme: effectiveTheme === "dark" ? "dark" : "light",
+          });
+        } catch {
+          // Ignore render errors
+        }
+      }
+    };
+
+    if (window.turnstile) {
+      initTurnstile();
+    } else {
+      timer = window.setInterval(() => {
+        if (window.turnstile) {
+          clearInterval(timer);
+          initTurnstile();
+        }
+      }, 200);
+    }
+
+    return () => {
+      clearInterval(timer);
+      if (widgetIdRef.current && window.turnstile) {
+        try {
+          window.turnstile.remove(widgetIdRef.current);
+        } catch {
+          // Ignore removal errors
+        }
+        widgetIdRef.current = null;
+      }
+    };
+  }, [effectiveTheme]);
+
+  const handleCreateShare = async () => {
+    if (!turnstileToken) {
+      setErrorMessage("セキュリティ認証（Turnstile）を完了してください。");
+      return;
+    }
+
+    setIsCreating(true);
+    setErrorMessage(null);
+
+    try {
+      const res = await fetch("/api/shares", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          document: doc,
+          turnstileToken,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = (await res.json().catch(() => ({}))) as { error?: string };
+        const msg = errData.error || `共有リンクの作成に失敗しました (${res.status})`;
+        setErrorMessage(msg);
+        if (widgetIdRef.current && window.turnstile) {
+          window.turnstile.reset(widgetIdRef.current);
+          setTurnstileToken(null);
+        }
+        setIsCreating(false);
+        return;
+      }
+
+      const data = (await res.json()) as { id: string; url: string; deleteToken: string };
+
+      await navigator.clipboard.writeText(data.url);
+      onToast("共有リンクを作成してコピーしました");
+
+      const newShareItem: MyShareItem = {
+        id: data.id,
+        deleteToken: data.deleteToken,
+        title: doc.title,
+        createdAt: new Date().toISOString(),
+      };
+      const updatedShares = [newShareItem, ...myShares.filter((item) => item.id !== data.id)].slice(0, 30);
+      setMyShares(updatedShares);
+      localStorage.setItem(MY_SHARES_KEY, JSON.stringify(updatedShares));
+
+      onClose();
+    } catch {
+      setErrorMessage("通信エラーが発生しました。ネットワーク接続を確認してください。");
+      if (widgetIdRef.current && window.turnstile) {
+        window.turnstile.reset(widgetIdRef.current);
+        setTurnstileToken(null);
+      }
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleDeleteShare = async (item: MyShareItem) => {
+    if (!window.confirm(`「${item.title}」の共有リンクを削除しますか？\n削除すると、このリンクからはアクセスできなくなります。`)) {
+      return;
+    }
+
+    setDeletingId(item.id);
+    try {
+      const res = await fetch(`/api/shares/${item.id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${item.deleteToken}`,
+        },
+      });
+
+      if (!res.ok && res.status !== 404) {
+        onToast("共有リンクの削除に失敗しました");
+        setDeletingId(null);
+        return;
+      }
+
+      const updated = myShares.filter((s) => s.id !== item.id);
+      setMyShares(updated);
+      localStorage.setItem(MY_SHARES_KEY, JSON.stringify(updated));
+      onToast("共有リンクを削除しました");
+    } catch {
+      onToast("通信エラーにより削除できませんでした");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="dialog share-dialog" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <div>
+            <h2>人生グラフを共有</h2>
+          </div>
+          <IconButton label="閉じる" onClick={onClose}>
+            <X size={20} />
+          </IconButton>
+        </div>
+
+        <div className="share-options">
+          <button onClick={handleCreateShare} disabled={isCreating}>
+            <span className="share-icon accent">
+              {isCreating ? <Loader2 size={22} className="share-spinner" /> : <Link size={22} />}
+            </span>
+            <span>
+              <strong>{isCreating ? "短縮リンクを作成中..." : "リンクを作成してコピー"}</strong>
+              <small>共有データは短縮リンクを提供するためCloudflare上に保存されます</small>
+            </span>
+          </button>
+
+          <button onClick={onPng}>
+            <span className="share-icon coral">
+              <Download size={22} />
+            </span>
+            <span>
+              <strong>PNGで保存</strong>
+            </span>
+          </button>
+
+          <button onClick={onJson}>
+            <span className="share-icon blue">
+              <FileDown size={22} />
+            </span>
+            <span>
+              <strong>JSONでエクスポート</strong>
+            </span>
+          </button>
+
+          {!readOnly && (
+            <button onClick={onImport}>
+              <span className="share-icon neutral">
+                <FileUp size={22} />
+              </span>
+              <span>
+                <strong>JSONをインポート</strong>
+              </span>
+            </button>
+          )}
+        </div>
+
+        <div className="share-turnstile-wrap" ref={turnstileContainerRef} />
+
+        {errorMessage && <p className="share-error-text">{errorMessage}</p>}
+
+        <p className="privacy-note">
+          共有リンクを知っている人は内容を見ることができます。個人情報の入力にはご注意ください。
+        </p>
+
+        {myShares.length > 0 && (
+          <div className="share-manage-section">
+            <h3>このブラウザで作成した共有リンク ({myShares.length})</h3>
+            {myShares.map((item) => (
+              <div key={item.id} className="share-history-item">
+                <span>{item.title}</span>
+                <button
+                  type="button"
+                  className="button danger"
+                  style={{ padding: "4px 8px", minHeight: "28px" }}
+                  disabled={deletingId === item.id}
+                  onClick={() => handleDeleteShare(item)}
+                >
+                  <Trash2 size={13} />
+                  {deletingId === item.id ? "削除中..." : "削除"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default App;
+
