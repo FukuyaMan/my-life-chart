@@ -29,6 +29,7 @@ import {
   Minus,
   Moon,
   MoreHorizontal,
+  Pencil,
   Plus,
   Redo2,
   RotateCcw,
@@ -57,6 +58,7 @@ import { z } from "zod";
 type Theme = "auto" | "light" | "dark";
 type Mode = "lifetime" | "year" | "custom";
 type Precision = "year" | "month" | "day";
+type LineStyle = "straight" | "curve";
 
 type TimelineEvent = {
   id: string;
@@ -68,7 +70,7 @@ type TimelineEvent = {
 };
 
 type TimelineDocument = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   id: string;
   title: string;
   mode: Mode;
@@ -77,6 +79,7 @@ type TimelineDocument = {
   endAge: number;
   showCalendarYear: boolean;
   inputPrecision: Precision;
+  lineStyle: LineStyle;
   events: TimelineEvent[];
   updatedAt: string;
 };
@@ -91,7 +94,7 @@ const eventSchema = z.object({
 });
 
 const documentSchema = z.object({
-  schemaVersion: z.literal(3),
+  schemaVersion: z.literal(4),
   id: z.string(),
   title: z.string(),
   mode: z.enum(["lifetime", "year", "custom"]),
@@ -100,6 +103,7 @@ const documentSchema = z.object({
   endAge: z.number().min(1).max(120),
   showCalendarYear: z.boolean(),
   inputPrecision: z.enum(["year", "month", "day"]),
+  lineStyle: z.enum(["straight", "curve"]),
   events: z.array(eventSchema),
   updatedAt: z.string(),
 });
@@ -108,7 +112,7 @@ const today = new Date();
 const defaultBirth = `${getYear(today) - 30}-01-01`;
 const defaultEndAge = differenceInYears(today, parseISO(defaultBirth));
 const defaultDocument: TimelineDocument = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   id: crypto.randomUUID(),
   title: "わたしの人生グラフ",
   mode: "lifetime",
@@ -117,11 +121,12 @@ const defaultDocument: TimelineDocument = {
   endAge: defaultEndAge,
   showCalendarYear: true,
   inputPrecision: "year",
+  lineStyle: "straight",
   events: [{ id: "birth", occurredAt: defaultBirth, datePrecision: "day", score: 0, title: "誕生", description: "" }],
   updatedAt: new Date().toISOString(),
 };
 
-const STORAGE_KEY = "jinsei-graph:document:v4";
+const STORAGE_KEY = "jinsei-graph:document:v5";
 const THEME_KEY = "jinsei-graph:theme";
 const MARGIN = { top: 46, right: 34, bottom: 72, left: 52 };
 const GRAPH_HEIGHT = 460;
@@ -244,8 +249,12 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function eventTone(score: number) {
+  return score > 0 ? "positive" : score < 0 ? "negative" : "neutral";
+}
+
 function IconButton({ label, children, onClick, disabled = false }: { label: string; children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
-  return <button className="icon-button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
+  return <button type="button" className="icon-button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
 function App() {
@@ -283,11 +292,14 @@ function App() {
   const [width, setWidth] = useState(900);
   const graphWrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const dragStartRef = useRef<TimelineDocument | null>(null);
   const themeCycleOriginRef = useRef<"light" | "dark">(systemTheme());
   const panStartRef = useRef<{ pointerId: number; clientX: number; view: [number, number] } | null>(null);
   const suppressDoubleClickRef = useRef(false);
+  const eventDragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const eventDragMovedRef = useRef(false);
   const [isPanning, setIsPanning] = useState(false);
   const readOnly = Boolean(sharedDocument);
   const effectiveTheme = theme === "auto" ? systemTheme() : theme;
@@ -356,15 +368,26 @@ function App() {
   }).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)), [doc.events, view]);
   const writableEnd = getWritableEnd(doc);
   const writableEndX = xForDate(writableEnd);
+  const lineIsNeutral = doc.events.every((event) => event.score === 0);
 
-  const linePoints = useMemo(() => {
+  const linePath = useMemo(() => {
+    const sorted = [...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+    const previous = sorted.filter((event) => safeDate(event.occurredAt) < view[0]).at(-1);
+    const startScore = previous?.score ?? 0;
+    const endScore = visibleEvents.at(-1)?.score ?? startScore;
     const points = [
-      { date: view[0], score: 0 },
+      { date: view[0], score: startScore },
       ...visibleEvents.map((event) => ({ date: safeDate(event.occurredAt), score: event.score })),
-      { date: writableEnd < view[1] ? writableEnd : view[1], score: 0 },
-    ];
-    return points.map((item) => `${xForDate(item.date)},${yForScore(item.score)}`).join(" ");
-  }, [visibleEvents, view, plotWidth]);
+      { date: writableEnd < view[1] ? writableEnd : view[1], score: endScore },
+    ].map((item) => ({ x: xForDate(item.date), y: yForScore(item.score) }));
+    if (!points.length) return "";
+    return points.slice(1).reduce((path, point, index) => {
+      const previousPoint = points[index];
+      if (doc.lineStyle === "straight") return `${path} L ${point.x} ${point.y}`;
+      const middle = (previousPoint.x + point.x) / 2;
+      return `${path} C ${middle} ${previousPoint.y}, ${middle} ${point.y}, ${point.x} ${point.y}`;
+    }, `M ${points[0].x} ${points[0].y}`);
+  }, [doc.events, doc.lineStyle, visibleEvents, view, plotWidth, writableEnd]);
 
   const zoom = (factor: number) => {
     const center = (view[0].getTime() + view[1].getTime()) / 2;
@@ -544,8 +567,11 @@ function App() {
     const next = pointerFromEvent(event.clientX, event.clientY);
     if (dragging && !readOnly) {
       const end = getWritableEnd(doc);
-      const snapped = snapDate(next.date > end ? end : next.date, doc.inputPrecision);
+      const draggedEvent = doc.events.find((item) => item.id === dragging);
+      const precision = draggedEvent?.datePrecision ?? doc.inputPrecision;
+      const snapped = snapDate(next.date > end ? end : next.date, precision);
       const eventDate = snapped > end ? end : snapped;
+      if (eventDragStartRef.current && Math.hypot(event.clientX - eventDragStartRef.current.x, event.clientY - eventDragStartRef.current.y) > 3) eventDragMovedRef.current = true;
       updateDoc((current) => ({ ...current, events: current.events.map((item) => item.id === dragging ? { ...item, occurredAt: format(eventDate, "yyyy-MM-dd"), score: next.score } : item) }), false);
     } else {
       if (next.date > getWritableEnd(doc)) {
@@ -553,13 +579,13 @@ function App() {
       } else {
         const snapped = snapDate(next.date, doc.inputPrecision);
         const snappedDate = snapped > getWritableEnd(doc) ? getWritableEnd(doc) : snapped;
-        setPointer({ ...next, date: snappedDate, x: xForDate(snappedDate) });
+        setPointer({ ...next, date: snappedDate, x: xForDate(snappedDate), y: yForScore(next.score) });
       }
     }
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${eventsOpen ? "events-panel-open" : ""}`}>
       <header className="topbar">
         <div className="brand" aria-label="人生グラフ ホーム">
           <span className="brand-mark"><span /></span>
@@ -590,14 +616,10 @@ function App() {
         <section className="hero-row">
           <div>
             <p className="eyebrow">MY LIFE, IN ONE LINE</p>
-            <input
-              className="title-input"
-              aria-label="人生グラフのタイトル"
-              value={doc.title}
-              readOnly={readOnly}
-              maxLength={60}
-              onChange={(event) => updateDoc((current) => ({ ...current, title: event.target.value }))}
-            />
+            <div className="title-editor">
+              <input ref={titleRef} className="title-input" aria-label="人生グラフのタイトル" value={doc.title} readOnly={readOnly} maxLength={60} onChange={(event) => updateDoc((current) => ({ ...current, title: event.target.value }))} />
+              {!readOnly && <IconButton label="タイトルを編集" onClick={() => { titleRef.current?.focus(); titleRef.current?.select(); }}><Pencil size={15} /></IconButton>}
+            </div>
             {doc.mode === "lifetime" && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
               <label><input aria-label="生年月日" type="date" value={birthDraft} readOnly={readOnly} onChange={(e) => { setBirthDraft(e.target.value); changeBirthDate(e.target.value); }} /><span>生まれ</span></label>
               <span className="quick-divider">·</span>
@@ -615,6 +637,7 @@ function App() {
           <div className="graph-toolbar">
             <div className="date-window"><CalendarDays size={16} /><span>{formatRange(view[0], view[1])}</span><span className="unit-pill">{unitLabel}表示</span></div>
             {!readOnly && <div className="precision-control"><span>記録単位</span><div>{([['year', '年'], ['month', '月'], ['day', '日']] as const).map(([value, text]) => <button key={value} className={doc.inputPrecision === value ? "active" : ""} onClick={() => updateDoc((current) => ({ ...current, inputPrecision: value }))}>{text}</button>)}</div></div>}
+            <div className="line-control"><span>線</span><div>{([['straight', '直線'], ['curve', '曲線']] as const).map(([value, text]) => <button key={value} className={doc.lineStyle === value ? "active" : ""} onClick={() => updateDoc((current) => ({ ...current, lineStyle: value }))}>{text}</button>)}</div></div>
             <div className="zoom-controls">
               <IconButton label="前の期間へ" onClick={() => pan(-1)}><ChevronLeft size={17} /></IconButton>
               <IconButton label="縮小" onClick={() => zoom(1.7)}><Minus size={17} /></IconButton>
@@ -650,7 +673,7 @@ function App() {
                   if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
                   window.setTimeout(() => { suppressDoubleClickRef.current = false; }, 280);
                 }
-                if (dragging) { if (dragStartRef.current) setHistory((items) => [...items, dragStartRef.current!].slice(-20)); dragStartRef.current = null; setFuture([]); setDragging(null); }
+                if (dragging) { if (dragStartRef.current) setHistory((items) => [...items, dragStartRef.current!].slice(-20)); dragStartRef.current = null; eventDragStartRef.current = null; setFuture([]); setDragging(null); window.setTimeout(() => { eventDragMovedRef.current = false; }, 360); }
               }}
               onWheel={(event: WheelEvent<SVGSVGElement>) => { event.preventDefault(); zoom(event.deltaY > 0 ? 1.22 : 0.82); }}
             >
@@ -681,8 +704,8 @@ function App() {
                   {label.secondary && <text className="x-sub-label" x={xForDate(tick)} y={GRAPH_HEIGHT - 24} textAnchor="middle">{label.secondary}</text>}
                 </g>;
               })}
-              <polyline className="life-line life-line-shadow" points={linePoints} />
-              <polyline className="life-line" points={linePoints} />
+              <path className={`life-line life-line-shadow ${lineIsNeutral ? "neutral" : ""}`} d={linePath} />
+              <path className={`life-line ${lineIsNeutral ? "neutral" : ""}`} d={linePath} />
 
               {visibleEvents.map((event, index) => {
                 const date = safeDate(event.occurredAt);
@@ -692,10 +715,10 @@ function App() {
                 const labelY = y + (above ? -30 : 34);
                 const nearLeft = x < MARGIN.left + 55;
                 const labelX = nearLeft ? x + 9 : x;
-                return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onClick={() => setModal({ open: true, event })} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
+                return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onDoubleClick={(e) => { e.stopPropagation(); if (!eventDragMovedRef.current) setModal({ open: true, event }); }} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
                   <line className="event-stem" x1={x} x2={x} y1={y} y2={labelY + (above ? 8 : -14)} />
                   <circle className="event-halo" cx={x} cy={y} r="13" />
-                  <circle className={event.score >= 0 ? "event-dot positive" : "event-dot negative"} cx={x} cy={y} r="7" onPointerDown={(e) => { e.stopPropagation(); dragStartRef.current = doc; setDragging(event.id); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); }} />
+                  <circle className={`event-dot ${eventTone(event.score)}`} cx={x} cy={y} r="7" onPointerDown={(e) => { e.stopPropagation(); dragStartRef.current = doc; eventDragStartRef.current = { x: e.clientX, y: e.clientY }; eventDragMovedRef.current = false; setDragging(event.id); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); }} />
                   <text className="event-title" x={labelX} y={labelY} textAnchor={nearLeft ? "start" : "middle"}>{event.title.length > 16 ? `${event.title.slice(0, 15)}…` : event.title}</text>
                   <text className="event-score" x={labelX} y={labelY + 16} textAnchor={nearLeft ? "start" : "middle"}>{event.score > 0 ? `+${event.score}` : event.score}</text>
                   {index === visibleEvents.length - 1 && <title>{event.title}</title>}
@@ -717,8 +740,6 @@ function App() {
           </div>
 
           <div className="graph-footer">
-            <span><i className="legend positive" />心が上向いた時間</span>
-            <span><i className="legend negative" />立ち止まった時間</span>
             {!readOnly && <button className="button primary add-event" onClick={() => openNewEvent()}><Plus size={18} />出来事を追加</button>}
           </div>
         </section>
@@ -729,7 +750,7 @@ function App() {
             <span>個の出来事</span>
           </div>
           <div className="event-previews">
-            {doc.events.slice(0, 3).map((event) => <button key={event.id} onClick={() => setModal({ open: true, event })}><span>{eventDateLabel(event, doc)}</span>{event.title}</button>)}
+            {[...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).map((event) => <button key={event.id} className={eventTone(event.score)} onClick={() => setModal({ open: true, event })}><span>{eventDateLabel(event, doc)}</span>{event.title}</button>)}
             {!doc.events.length && <span className="muted">まだ出来事はありません。</span>}
           </div>
           <button className="text-button" onClick={() => setEventsOpen(true)}><List size={17} />一覧を見る</button>
@@ -791,8 +812,8 @@ function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: Timeli
 }
 
 function EventsPanel({ doc, readOnly, onClose, onSelect, onAdd }: { doc: TimelineDocument; readOnly: boolean; onClose: () => void; onSelect: (event: TimelineEvent) => void; onAdd: () => void }) {
-  return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="drawer events-drawer" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><p className="eyebrow">LIFE EVENTS</p><h2>出来事の一覧</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
-    <div className="all-events">{[...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).map((event) => <button key={event.id} onClick={() => onSelect(event)}><i className={event.score >= 0 ? "positive" : "negative"} /><span><small>{eventDateLabel(event, doc)}</small><strong>{event.title}</strong>{event.description && <em>{event.description}</em>}</span><b>{event.score > 0 ? `+${event.score}` : event.score}</b></button>)}{!doc.events.length && <div className="empty-list"><MoreHorizontal size={28} /><p>まだ出来事はありません</p></div>}</div>
+  return <div className="drawer-backdrop events-panel-backdrop" onMouseDown={onClose}><aside className="drawer events-drawer" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><p className="eyebrow">LIFE EVENTS</p><h2>出来事の一覧</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
+    <div className="all-events">{[...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).map((event) => <button key={event.id} onClick={() => onSelect(event)}><i className={eventTone(event.score)} /><span><small>{eventDateLabel(event, doc)}</small><strong>{event.title}</strong>{event.description && <em>{event.description}</em>}</span><b>{event.score > 0 ? `+${event.score}` : event.score}</b></button>)}{!doc.events.length && <div className="empty-list"><MoreHorizontal size={28} /><p>まだ出来事はありません</p></div>}</div>
     {!readOnly && <button className="button primary full" onClick={onAdd}><Plus size={18} />出来事を追加</button>}
   </aside></div>;
 }
