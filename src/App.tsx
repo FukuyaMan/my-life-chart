@@ -271,6 +271,7 @@ function App() {
   const [history, setHistory] = useState<TimelineDocument[]>([]);
   const [future, setFuture] = useState<TimelineDocument[]>([]);
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem(THEME_KEY) as Theme) || "auto");
+  const [birthDraft, setBirthDraft] = useState(doc.birth);
   const [view, setView] = useState<[Date, Date]>(() => getFullRange(sharedDocument || doc));
   const [modal, setModal] = useState<{ open: boolean; event: TimelineEvent | null }>({ open: false, event: null });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -285,6 +286,9 @@ function App() {
   const importRef = useRef<HTMLInputElement>(null);
   const dragStartRef = useRef<TimelineDocument | null>(null);
   const themeCycleOriginRef = useRef<"light" | "dark">(systemTheme());
+  const panStartRef = useRef<{ pointerId: number; clientX: number; view: [number, number] } | null>(null);
+  const suppressDoubleClickRef = useRef(false);
+  const [isPanning, setIsPanning] = useState(false);
   const readOnly = Boolean(sharedDocument);
   const effectiveTheme = theme === "auto" ? systemTheme() : theme;
 
@@ -317,6 +321,8 @@ function App() {
     if (!readOnly) localStorage.setItem(STORAGE_KEY, JSON.stringify(doc));
     document.title = `${doc.title} | 人生グラフ`;
   }, [doc, readOnly]);
+
+  useEffect(() => setBirthDraft(doc.birth), [doc.birth]);
 
   useEffect(() => {
     localStorage.setItem(THEME_KEY, theme);
@@ -495,11 +501,10 @@ function App() {
     setView(range);
   };
 
-  const changeBirthYear = (year: number) => {
-    const safeYear = Math.trunc(year);
-    if (!Number.isFinite(safeYear) || safeYear < 1 || safeYear > 9999) return;
-    const monthDay = doc.birth.slice(4) || "-01-01";
-    const next = withBirth(doc, `${String(safeYear).padStart(4, "0")}${monthDay}`);
+  const changeBirthDate = (birth: string) => {
+    const parsed = parseISO(birth);
+    if (!birth || !isValid(parsed)) return;
+    const next = withBirth(doc, birth);
     updateDoc(() => next);
     setView(getFullRange(next));
   };
@@ -518,6 +523,24 @@ function App() {
   };
 
   const onGraphMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (panStartRef.current) {
+      const start = panStartRef.current;
+      const moved = event.clientX - start.clientX;
+      if (Math.abs(moved) > 3) {
+        setIsPanning(true);
+        suppressDoubleClickRef.current = true;
+      }
+      const full = getFullRange(doc);
+      const span = start.view[1] - start.view[0];
+      const shift = -(moved / Math.max(1, svgRef.current!.getBoundingClientRect().width)) * span;
+      let nextStart = start.view[0] + shift;
+      let nextEnd = start.view[1] + shift;
+      if (nextStart < full[0].getTime()) { nextEnd += full[0].getTime() - nextStart; nextStart = full[0].getTime(); }
+      if (nextEnd > full[1].getTime()) { nextStart -= nextEnd - full[1].getTime(); nextEnd = full[1].getTime(); }
+      setView([new Date(nextStart), new Date(nextEnd)]);
+      setPointer(null);
+      return;
+    }
     const next = pointerFromEvent(event.clientX, event.clientY);
     if (dragging && !readOnly) {
       const end = getWritableEnd(doc);
@@ -576,7 +599,7 @@ function App() {
               onChange={(event) => updateDoc((current) => ({ ...current, title: event.target.value }))}
             />
             {doc.mode === "lifetime" && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
-              <label><input aria-label="生まれた年" type="number" value={getYear(safeDate(doc.birth))} readOnly={readOnly} onChange={(e) => changeBirthYear(Number(e.target.value))} /><span>年生まれ</span></label>
+              <label><input aria-label="生年月日" type="date" value={birthDraft} readOnly={readOnly} onChange={(e) => { setBirthDraft(e.target.value); changeBirthDate(e.target.value); }} /><span>生まれ</span></label>
               <span className="quick-divider">·</span>
               <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
             </div>}
@@ -604,17 +627,31 @@ function App() {
           <div className="graph-wrap" ref={graphWrapRef}>
             <svg
               ref={svgRef}
-              className="graph"
+              className={`graph ${isPanning ? "is-panning" : ""}`}
               viewBox={`0 0 ${width} ${GRAPH_HEIGHT}`}
               role="img"
               aria-label={`${doc.title}。${doc.events.length}件の出来事があります`}
               onDoubleClick={(event: ReactMouseEvent<SVGSVGElement>) => {
+                if (suppressDoubleClickRef.current) return;
                 const point = pointerFromEvent(event.clientX, event.clientY);
                 openNewEvent(point.date, point.score);
               }}
+              onPointerDown={(event) => {
+                if (event.button !== 0 || (event.target as Element).closest(".event-node")) return;
+                panStartRef.current = { pointerId: event.pointerId, clientX: event.clientX, view: [view[0].getTime(), view[1].getTime()] };
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
               onPointerMove={onGraphMove}
-              onPointerLeave={() => { setPointer(null); setDragging(null); }}
-              onPointerUp={() => { if (dragging) { if (dragStartRef.current) setHistory((items) => [...items, dragStartRef.current!].slice(-20)); dragStartRef.current = null; setFuture([]); setDragging(null); } }}
+              onPointerLeave={() => setPointer(null)}
+              onPointerUp={(event) => {
+                if (panStartRef.current) {
+                  panStartRef.current = null;
+                  setIsPanning(false);
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                  window.setTimeout(() => { suppressDoubleClickRef.current = false; }, 280);
+                }
+                if (dragging) { if (dragStartRef.current) setHistory((items) => [...items, dragStartRef.current!].slice(-20)); dragStartRef.current = null; setFuture([]); setDragging(null); }
+              }}
               onWheel={(event: WheelEvent<SVGSVGElement>) => { event.preventDefault(); zoom(event.deltaY > 0 ? 1.22 : 0.82); }}
             >
               <defs>
@@ -741,12 +778,13 @@ function EventDialog({ event, doc, readOnly, onClose, onSave, onDelete }: { even
 
 function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: TimelineDocument; theme: Theme; onTheme: (theme: Theme) => void; onClose: () => void; onChange: (doc: TimelineDocument) => void }) {
   const [draft, setDraft] = useState(doc);
+  const [birthInput, setBirthInput] = useState(doc.birth);
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}><div className="dialog-header"><div><p className="eyebrow">PREFERENCES</p><h2>グラフの設定</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
     <label>タイトル<input maxLength={60} value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
     <label>何歳まで表示するか<div className="setting-with-suffix"><input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><span>歳まで</span></div></label>
     {draft.mode === "custom" && <div className="field-row"><label>開始日<input type="date" value={draft.range.start} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, start: e.target.value } })} /></label><label>終了日<input type="date" value={draft.range.end} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, end: e.target.value } })} /></label></div>}
     <label className="toggle-row"><span><strong>西暦を表示</strong><small>年齢の下に西暦を添えます</small></span><input type="checkbox" checked={draft.showCalendarYear} onChange={(e) => setDraft({ ...draft, showCalendarYear: e.target.checked })} /></label>
-    <label className="birth-year-field">生年月日<div><input type="date" value={draft.birth} onChange={(e) => setDraft(withBirth(draft, e.target.value))} /></div><small>変更すると「誕生」の日付と終了年齢を現在の年齢に合わせます</small></label>
+    <label className="birth-year-field">生年月日<div><input type="date" value={birthInput} onChange={(e) => { setBirthInput(e.target.value); if (e.target.value && isValid(parseISO(e.target.value))) setDraft(withBirth(draft, e.target.value)); }} /></div><small>入力中は空欄にできます。有効な日付になると「誕生」と終了年齢を更新します</small></label>
     <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={theme === value ? "selected" : ""} onClick={() => onTheme(value)}><Icon size={18} />{text}{theme === value && <Check size={15} />}</button>)}</div></fieldset>
     <button className="button primary full" onClick={() => { onChange(draft); onClose(); }}>設定を保存</button>
   </aside></div>;
