@@ -510,7 +510,12 @@ function App() {
       const eventDate = snapDate(next.date > end ? end : next.date, doc.inputPrecision);
       updateDoc((current) => ({ ...current, events: current.events.map((item) => item.id === dragging ? { ...item, occurredAt: format(eventDate, "yyyy-MM-dd"), score: next.score } : item) }), false);
     } else {
-      setPointer(next);
+      if (next.date > getWritableEnd(doc)) {
+        setPointer(null);
+      } else {
+        const snappedDate = snapDate(next.date, doc.inputPrecision);
+        setPointer({ ...next, date: snappedDate, x: xForDate(snappedDate) });
+      }
     }
   };
 
@@ -656,7 +661,7 @@ function App() {
                   <line x1={MARGIN.left} x2={width - MARGIN.right} y1={pointer.y} y2={pointer.y} />
                   <g transform={`translate(${clamp(pointer.x - 58, MARGIN.left, width - MARGIN.right - 116)},${clamp(pointer.y - 48, MARGIN.top, GRAPH_HEIGHT - MARGIN.bottom - 40)})`}>
                     <rect width="116" height="38" rx="9" />
-                    <text x="10" y="16">{format(pointer.date, "yyyy/M/d")}</text>
+                    <text x="10" y="16">{doc.inputPrecision === "year" ? format(pointer.date, "yyyy年") : doc.inputPrecision === "month" ? format(pointer.date, "yyyy年M月") : format(pointer.date, "yyyy/M/d")}</text>
                     <text x="10" y="30">スコア {pointer.score > 0 ? `+${pointer.score}` : pointer.score}</text>
                   </g>
                 </g>
