@@ -146,9 +146,9 @@ function systemTheme(): "light" | "dark" {
 }
 
 function snapDate(date: Date, precision: Precision): Date {
-  if (precision === "year") return startOfYear(date);
-  if (precision === "month") return startOfMonth(date);
-  return parseISO(format(date, "yyyy-MM-dd"));
+  const current = precision === "year" ? startOfYear(date) : precision === "month" ? startOfMonth(date) : startOfDay(date);
+  const next = precision === "year" ? addYears(current, 1) : precision === "month" ? addMonths(current, 1) : addDays(current, 1);
+  return date.getTime() - current.getTime() <= next.getTime() - date.getTime() ? current : next;
 }
 
 function snapDateForDocument(date: Date, precision: Precision, doc: TimelineDocument): Date {
@@ -290,10 +290,12 @@ function IconButton({ label, children, onClick, disabled = false }: { label: str
   return <button type="button" className="icon-button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
-function DatePickerField({ value, onChange, readOnly = false, compact = false }: { value: string; onChange: (value: string) => void; readOnly?: boolean; compact?: boolean }) {
+function DatePickerField({ value, onChange, readOnly = false, compact = false, label = "日付", minDate = new Date(1900, 0, 1), maxDate = new Date(2100, 11, 31) }: { value: string; onChange: (value: string) => void; readOnly?: boolean; compact?: boolean; label?: string; minDate?: Date; maxDate?: Date }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selected = safeDate(value);
+  const [month, setMonth] = useState(selected);
+  useEffect(() => setMonth(selected), [value]);
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -303,10 +305,13 @@ function DatePickerField({ value, onChange, readOnly = false, compact = false }:
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   return <div className={`date-picker-field ${compact ? "compact" : ""}`} ref={rootRef}>
-    <button type="button" className="date-picker-trigger" disabled={readOnly} aria-label={`生年月日 ${format(selected, "yyyy年M月d日")}`} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+    <button type="button" className="date-picker-trigger" disabled={readOnly} aria-label={`${label} ${format(selected, "yyyy年M月d日")}`} aria-expanded={open} onClick={() => setOpen((current) => !current)}>
       <span>{format(selected, "yyyy / MM / dd")}</span><CalendarDays size={15} />
     </button>
-    {open && <div className="date-picker-popover"><DayPicker mode="single" locale={ja} selected={selected} defaultMonth={selected} captionLayout="dropdown" startMonth={new Date(1900, 0)} endMonth={today} onSelect={(date) => { if (date) { onChange(format(date, "yyyy-MM-dd")); setOpen(false); } }} /></div>}
+    {open && <div className="date-picker-popover">
+      <div className="calendar-jump"><label><span>年</span><input type="number" min={getYear(minDate)} max={getYear(maxDate)} value={getYear(month)} onChange={(event) => setMonth(new Date(clamp(Number(event.target.value), getYear(minDate), getYear(maxDate)), month.getMonth(), 1))} /></label><label><span>月</span><select value={month.getMonth() + 1} onChange={(event) => setMonth(new Date(getYear(month), Number(event.target.value) - 1, 1))}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}月</option>)}</select></label></div>
+      <DayPicker mode="single" locale={ja} selected={selected} month={month} onMonthChange={setMonth} startMonth={minDate} endMonth={maxDate} hideNavigation onSelect={(date) => { if (date) { onChange(format(date, "yyyy-MM-dd")); setOpen(false); } }} />
+    </div>}
   </div>;
 }
 
@@ -720,7 +725,7 @@ function App() {
               {!readOnly && <IconButton label="タイトルを編集" onClick={() => { titleRef.current?.focus(); titleRef.current?.select(); }}><Pencil size={15} /></IconButton>}
             </div>
             {doc.mode === "lifetime" && <div className="quick-age-settings" aria-label="人生グラフの年齢設定">
-              <label><DatePickerField value={doc.birth} onChange={changeBirthDate} readOnly={readOnly} compact /><span>生まれ</span></label>
+              <label><DatePickerField value={doc.birth} onChange={changeBirthDate} readOnly={readOnly} compact label="生年月日" maxDate={today} /><span>生まれ</span></label>
               <span className="quick-divider">·</span>
               <label><input aria-label="何歳まで表示するか" type="number" min="1" max="120" value={doc.endAge} readOnly={readOnly} onChange={(e) => changeEndAge(Number(e.target.value))} /><span>歳まで</span></label>
             </div>}
@@ -729,9 +734,9 @@ function App() {
               <label><select aria-label="開始月" value={doc.yearStartMonth} disabled={readOnly} onChange={(e) => changeYearSettings(doc.displayYear, Number(e.target.value))}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}月</option>)}</select><span>始まり</span></label>
             </div>}
             {doc.mode === "custom" && <div className="quick-period-settings custom-period-settings" aria-label="期間モードの期間設定">
-              <label><span>開始</span><input type="date" value={doc.range.start} readOnly={readOnly} onChange={(e) => changeCustomRange("start", e.target.value)} /></label>
+              <label><span>開始</span><DatePickerField value={doc.range.start} onChange={(value) => changeCustomRange("start", value)} readOnly={readOnly} compact label="開始日" /></label>
               <span className="quick-divider">—</span>
-              <label><span>終了</span><input type="date" value={doc.range.end} readOnly={readOnly} onChange={(e) => changeCustomRange("end", e.target.value)} /></label>
+              <label><span>終了</span><DatePickerField value={doc.range.end} onChange={(value) => changeCustomRange("end", value)} readOnly={readOnly} compact label="終了日" /></label>
             </div>}
           </div>
           <div className="mode-switch" aria-label="表示期間">
@@ -920,9 +925,9 @@ function SettingsPanel({ doc, theme, onTheme, onClose, onChange }: { doc: Timeli
     <label>タイトル<input maxLength={60} value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
     <label>何歳まで表示するか<div className="setting-with-suffix"><input aria-label="終了年齢" type="number" min="1" max="120" value={draft.endAge} onChange={(e) => setDraft({ ...draft, endAge: clamp(Number(e.target.value), 1, 120) })} /><span>歳まで</span></div></label>
     {draft.mode === "year" && <div className="field-row"><label>表示する年<input type="number" min="1" max="9999" value={draft.displayYear} onChange={(e) => setDraft(withYearRange(draft, Number(e.target.value), draft.yearStartMonth))} /></label><label>開始月<select value={draft.yearStartMonth} onChange={(e) => setDraft(withYearRange(draft, draft.displayYear, Number(e.target.value)))}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}月</option>)}</select></label></div>}
-    {draft.mode === "custom" && <div className="field-row"><label>開始日<input type="date" value={draft.range.start} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, start: e.target.value } })} /></label><label>終了日<input type="date" value={draft.range.end} onChange={(e) => setDraft({ ...draft, range: { ...draft.range, end: e.target.value } })} /></label></div>}
+    {draft.mode === "custom" && <div className="field-row"><label>開始日<DatePickerField value={draft.range.start} onChange={(value) => setDraft({ ...draft, range: { ...draft.range, start: value } })} label="開始日" /></label><label>終了日<DatePickerField value={draft.range.end} onChange={(value) => setDraft({ ...draft, range: { ...draft.range, end: value } })} label="終了日" /></label></div>}
     <label className="toggle-row"><span><strong>西暦を表示</strong><small>年齢の下に西暦を添えます</small></span><input type="checkbox" checked={draft.showCalendarYear} onChange={(e) => setDraft({ ...draft, showCalendarYear: e.target.checked })} /></label>
-    <label className="birth-year-field">生年月日<DatePickerField value={draft.birth} onChange={(birth) => setDraft(withBirth(draft, birth))} /><small>カレンダーから選択します。入力欄に曜日は表示されません</small></label>
+    <label className="birth-year-field">生年月日<DatePickerField value={draft.birth} onChange={(birth) => setDraft(withBirth(draft, birth))} label="生年月日" maxDate={today} /><small>カレンダーから選択します。入力欄に曜日は表示されません</small></label>
     <fieldset><legend>グラフの線</legend><div className="theme-options line-style-options">{([['curve', '曲線'], ['straight', '直線']] as const).map(([value, text]) => <button type="button" key={value} className={draft.lineStyle === value ? "selected" : ""} onClick={() => setDraft({ ...draft, lineStyle: value })}>{text}{draft.lineStyle === value && <Check size={15} />}</button>)}</div></fieldset>
     <fieldset><legend>テーマ</legend><div className="theme-options">{([['auto', '自動', CircleHelp], ['light', 'ライト', Sun], ['dark', 'ダーク', Moon]] as const).map(([value, text, Icon]) => <button type="button" key={value} className={draftTheme === value ? "selected" : ""} onClick={() => setDraftTheme(value)}><Icon size={18} />{text}{draftTheme === value && <Check size={15} />}</button>)}</div></fieldset>
     <div className="clear-events"><div><strong>出来事をクリア</strong><small>誕生を残して、追加した出来事をすべて削除します</small></div><button type="button" className="button danger" disabled={!draft.events.some((item) => item.id !== "birth")} onClick={() => { if (window.confirm("「誕生」以外の出来事をすべて削除しますか？")) setDraft({ ...draft, events: draft.events.filter((item) => item.id === "birth") }); }}><Trash2 size={16} />クリア</button></div>
