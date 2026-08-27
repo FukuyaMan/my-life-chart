@@ -144,6 +144,16 @@ function snapDate(date: Date, precision: Precision): Date {
   return parseISO(format(date, "yyyy-MM-dd"));
 }
 
+function snapDateForDocument(date: Date, precision: Precision, doc: TimelineDocument): Date {
+  if (precision !== "year" || doc.mode !== "lifetime") return snapDate(date, precision);
+  const birth = safeDate(doc.birth);
+  const age = Math.max(0, differenceInYears(date, birth));
+  const currentBirthday = addYears(birth, age);
+  const nextBirthday = addYears(birth, age + 1);
+  if (nextBirthday > getWritableEnd(doc)) return currentBirthday;
+  return Math.abs(date.getTime() - currentBirthday.getTime()) <= Math.abs(nextBirthday.getTime() - date.getTime()) ? currentBirthday : nextBirthday;
+}
+
 function withBirth(doc: TimelineDocument, birth: string): TimelineDocument {
   const birthDate = safeDate(birth);
   return {
@@ -383,6 +393,16 @@ function App() {
     }
     return result;
   }, [doc.mode, doc.birth, doc.endAge, unit, step, tickData.ticks, view]);
+  useEffect(() => {
+    if (readOnly) return;
+    const precision: Precision = unit === "year" ? "year" : unit === "month" ? "month" : "day";
+    setDoc((current) => current.inputPrecision === precision ? current : {
+      ...current,
+      inputPrecision: precision,
+      events: current.events.map((item) => item.id === "birth" ? item : { ...item, datePrecision: precision }),
+      updatedAt: new Date().toISOString(),
+    });
+  }, [unit, readOnly]);
   const visibleEvents = useMemo(() => doc.events.filter((event) => {
     const time = safeDate(event.occurredAt).getTime();
     return time >= view[0].getTime() && time <= view[1].getTime();
@@ -444,7 +464,7 @@ function App() {
       setToast("未来の余白には出来事を追加できません");
       return;
     }
-    const snapped = snapDate(date, doc.inputPrecision);
+    const snapped = snapDateForDocument(date, doc.inputPrecision, doc);
     const snappedDate = snapped > getWritableEnd(doc) ? getWritableEnd(doc) : snapped;
     setModal({
       open: true,
@@ -588,7 +608,7 @@ function App() {
     const next = pointerFromEvent(event.clientX, event.clientY);
     if (dragging && !readOnly) {
       const end = getWritableEnd(doc);
-      const snapped = snapDate(next.date > end ? end : next.date, doc.inputPrecision);
+      const snapped = snapDateForDocument(next.date > end ? end : next.date, doc.inputPrecision, doc);
       const eventDate = snapped > end ? end : snapped;
       if (eventDragStartRef.current && Math.hypot(event.clientX - eventDragStartRef.current.x, event.clientY - eventDragStartRef.current.y) > 3) eventDragMovedRef.current = true;
       updateDoc((current) => ({ ...current, events: current.events.map((item) => item.id === dragging ? { ...item, occurredAt: item.id === "birth" ? item.occurredAt : format(eventDate, "yyyy-MM-dd"), score: next.score } : item) }), false);
@@ -596,7 +616,7 @@ function App() {
       if (next.date > getWritableEnd(doc)) {
         setPointer(null);
       } else {
-        const snapped = snapDate(next.date, doc.inputPrecision);
+        const snapped = snapDateForDocument(next.date, doc.inputPrecision, doc);
         const snappedDate = snapped > getWritableEnd(doc) ? getWritableEnd(doc) : snapped;
         setPointer({ ...next, date: snappedDate, x: xForDate(snappedDate), y: yForScore(next.score) });
       }
@@ -757,10 +777,9 @@ function App() {
                 <g className="crosshair" pointerEvents="none">
                   <line x1={pointer.x} x2={pointer.x} y1={MARGIN.top} y2={GRAPH_HEIGHT - MARGIN.bottom} />
                   <line x1={MARGIN.left} x2={width - MARGIN.right} y1={pointer.y} y2={pointer.y} />
-                  <g transform={`translate(${clamp(pointer.x - 96, MARGIN.left, width - MARGIN.right - 192)},${clamp(pointer.y - 82, MARGIN.top, GRAPH_HEIGHT - MARGIN.bottom - 70)})`}>
-                    <rect width="192" height="70" rx="13" />
-                    <text x="16" y="29">{doc.inputPrecision === "year" ? format(pointer.date, "yyyy年") : doc.inputPrecision === "month" ? format(pointer.date, "yyyy年M月") : format(pointer.date, "yyyy/M/d")}</text>
-                    <text x="16" y="54">スコア {pointer.score > 0 ? `+${pointer.score}` : pointer.score}</text>
+                  <g transform={`translate(${clamp(pointer.x - 82, MARGIN.left, width - MARGIN.right - 164)},${clamp(pointer.y - 54, MARGIN.top, GRAPH_HEIGHT - MARGIN.bottom - 42)})`}>
+                    <rect width="164" height="42" rx="11" />
+                    <text x="14" y="26">{doc.inputPrecision === "year" ? (doc.mode === "lifetime" ? `${differenceInYears(pointer.date, safeDate(doc.birth))}歳 · ${format(pointer.date, "yyyy年")}` : format(pointer.date, "yyyy年")) : doc.inputPrecision === "month" ? format(pointer.date, "yyyy年M月") : format(pointer.date, "yyyy/M/d")}</text>
                   </g>
                 </g>
               )}
