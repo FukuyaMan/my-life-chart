@@ -568,19 +568,38 @@ function DatePickerField({ value, onChange, readOnly = false, compact = false, l
   </div>;
 }
 
-function getScoreAtTime(events: TimelineEvent[], date: Date): number {
-  if (!events.length) return 0;
-  const sorted = [...events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
-  const t = date.getTime();
-  const firstTime = safeDate(sorted[0].occurredAt).getTime();
-  if (t <= firstTime) return sorted[0].id === "birth" ? sorted[0].score : 0;
+function aggregateEventScores(events: TimelineEvent[]) {
+  const groups = new Map<number, { time: number; occurredAt: string; total: number; count: number; hasBirth: boolean }>();
+  for (const event of events) {
+    const time = safeDate(event.occurredAt).getTime();
+    const current = groups.get(time);
+    if (current) {
+      current.total += event.score;
+      current.count += 1;
+      current.hasBirth ||= event.id === "birth";
+    } else {
+      groups.set(time, { time, occurredAt: event.occurredAt, total: event.score, count: 1, hasBirth: event.id === "birth" });
+    }
+  }
+  return [...groups.values()]
+    .sort((a, b) => a.time - b.time)
+    .map((group) => ({ ...group, score: group.total / group.count }));
+}
 
-  const lastTime = safeDate(sorted[sorted.length - 1].occurredAt).getTime();
+function getScoreAtTime(events: TimelineEvent[], date: Date): number {
+  const sorted = aggregateEventScores(events);
+  if (!sorted.length) return 0;
+  const t = date.getTime();
+  const firstTime = sorted[0].time;
+  if (t < firstTime) return sorted[0].hasBirth ? sorted[0].score : 0;
+  if (t === firstTime) return sorted[0].score;
+
+  const lastTime = sorted[sorted.length - 1].time;
   if (t >= lastTime) return sorted[sorted.length - 1].score;
 
   for (let i = 0; i < sorted.length - 1; i++) {
-    const t1 = safeDate(sorted[i].occurredAt).getTime();
-    const t2 = safeDate(sorted[i + 1].occurredAt).getTime();
+    const t1 = sorted[i].time;
+    const t2 = sorted[i + 1].time;
     if (t >= t1 && t <= t2) {
       const ratio = (t - t1) / (t2 - t1 || 1);
       return sorted[i].score + ratio * (sorted[i + 1].score - sorted[i].score);
@@ -756,7 +775,7 @@ function App() {
   const linePath = useMemo(() => {
     const minX = MARGIN.left;
     const maxX = width - MARGIN.right;
-    const sorted = [...doc.events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+    const sorted = aggregateEventScores(doc.events);
 
     if (!sorted.length) {
       const y0 = yForScore(0);
@@ -766,10 +785,7 @@ function App() {
     const startScore = getScoreAtTime(doc.events, view[0]);
     const endScore = getScoreAtTime(doc.events, view[1]);
 
-    const insideEvents = visibleEvents.filter((ev) => {
-      const t = safeDate(ev.occurredAt).getTime();
-      return t > view[0].getTime() && t < view[1].getTime();
-    });
+    const insideEvents = sorted.filter((event) => event.time > view[0].getTime() && event.time < view[1].getTime());
 
     const points = [
       { x: minX, y: yForScore(startScore) },
