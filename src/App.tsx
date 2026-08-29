@@ -215,7 +215,7 @@ const STORAGE_KEYS: Record<Mode, string> = {
   custom: "jinsei-graph:document:custom:v2",
 };
 const THEME_KEY = "jinsei-graph:theme";
-const MARGIN = { top: 46, right: 34, bottom: 72, left: 52 };
+const MARGIN = { top: 30, right: 34, bottom: 72, left: 52 };
 const GRAPH_HEIGHT = 460;
 
 function clamp(value: number, min: number, max: number) {
@@ -465,10 +465,18 @@ function eventTone(score: number) {
   return score > 0 ? "positive" : score < 0 ? "negative" : "neutral";
 }
 
-function eventLabelIsAbove(score: number, y: number) {
+function eventLabelIsAbove(score: number, y: number, labelHeight = 0) {
   const isNearTop = y < MARGIN.top + 50;
   const isNearBottom = y > GRAPH_HEIGHT - MARGIN.bottom - 50;
-  return !isNearTop && (score >= 0 || isNearBottom);
+  const preferred = !isNearTop && (score >= 0 || isNearBottom);
+  if (!labelHeight) return preferred;
+
+  const labelGap = 16;
+  const spaceAbove = y - MARGIN.top - labelGap;
+  const spaceBelow = GRAPH_HEIGHT - MARGIN.bottom - y - labelGap;
+  if (preferred && spaceAbove >= labelHeight) return true;
+  if (!preferred && spaceBelow >= labelHeight) return false;
+  return spaceAbove >= spaceBelow;
 }
 
 function approximateTextWidth(text: string, fontSize: number) {
@@ -857,6 +865,74 @@ function App() {
     const time = safeDate(event.occurredAt).getTime();
     return time >= view[0].getTime() && time <= view[1].getTime();
   }).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)), [doc.events, view]);
+  const eventLabelLayouts = useMemo(() => {
+    type LabelLayout = { x: number; y: number; width: number; height: number; above: boolean; displayTitle: string };
+    const layouts = new Map<string, LabelLayout>();
+    const occupied: LabelLayout[] = [];
+    const plotRight = width - MARGIN.right;
+    const plotBottom = GRAPH_HEIGHT - MARGIN.bottom;
+    const horizontalOffsets = [0, -37, 37, -74, 74, -111, 111];
+    const verticalOffsets = [0, -12, 12, -24, 24];
+    const eventPoints = visibleEvents.map((event) => ({
+      x: MARGIN.left + ((safeDate(event.occurredAt).getTime() - view[0].getTime()) / viewMs) * plotWidth,
+      y: MARGIN.top + ((110 - event.score) / 220) * plotHeight,
+    }));
+    const overlapArea = (candidate: LabelLayout, placed: LabelLayout) => {
+      const padding = 5;
+      const overlapWidth = Math.max(0, Math.min(candidate.x + candidate.width + padding, placed.x + placed.width + padding) - Math.max(candidate.x - padding, placed.x - padding));
+      const overlapHeight = Math.max(0, Math.min(candidate.y + candidate.height + padding, placed.y + placed.height + padding) - Math.max(candidate.y - padding, placed.y - padding));
+      return overlapWidth * overlapHeight;
+    };
+
+    for (const event of visibleEvents) {
+      const eventTime = safeDate(event.occurredAt).getTime();
+      const pointX = MARGIN.left + ((eventTime - view[0].getTime()) / viewMs) * plotWidth;
+      const pointY = MARGIN.top + ((110 - event.score) / 220) * plotHeight;
+      const displayTitle = event.title.length > 8 ? `${event.title.slice(0, 7)}…` : event.title;
+      const labelWidth = 29;
+      const labelHeight = Math.max(39, [...displayTitle].length * 17 + 10);
+      const preferredAbove = eventLabelIsAbove(event.score, pointY, labelHeight);
+      let best: { layout: LabelLayout; cost: number } | null = null;
+
+      for (const above of [preferredAbove, !preferredAbove]) {
+        const baseY = clamp(
+          above ? pointY - 16 - labelHeight : pointY + 16,
+          MARGIN.top + 4,
+          plotBottom - labelHeight - 4,
+        );
+        for (const horizontalOffset of horizontalOffsets) {
+          for (const verticalOffset of verticalOffsets) {
+            const layout: LabelLayout = {
+              x: clamp(pointX - labelWidth / 2 + horizontalOffset, MARGIN.left + 4, plotRight - labelWidth - 4),
+              y: clamp(baseY + verticalOffset, MARGIN.top + 4, plotBottom - labelHeight - 4),
+              width: labelWidth,
+              height: labelHeight,
+              above,
+              displayTitle,
+            };
+            const overlap = occupied.reduce((total, placed) => total + overlapArea(layout, placed), 0);
+            const pointCollisions = eventPoints.reduce((count, point) => {
+              const clearance = 13;
+              const nearestX = clamp(point.x, layout.x, layout.x + layout.width);
+              const nearestY = clamp(point.y, layout.y, layout.y + layout.height);
+              const distanceSquared = (point.x - nearestX) ** 2 + (point.y - nearestY) ** 2;
+              return count + (distanceSquared < clearance ** 2 ? 1 : 0);
+            }, 0);
+            const distance = Math.abs(horizontalOffset) + Math.abs(verticalOffset) * 1.5 + (above === preferredAbove ? 0 : 45);
+            const cost = pointCollisions * 100_000_000 + overlap * 1000 + distance;
+            if (!best || cost < best.cost) best = { layout, cost };
+            if (pointCollisions === 0 && overlap === 0 && distance === 0) break;
+          }
+        }
+      }
+
+      if (best) {
+        layouts.set(event.id, best.layout);
+        occupied.push(best.layout);
+      }
+    }
+    return layouts;
+  }, [visibleEvents, view, viewMs, plotWidth, plotHeight, width]);
   const writableEnd = getWritableEnd(doc);
   const linePath = useMemo(() => {
     const minX = MARGIN.left;
@@ -1316,7 +1392,6 @@ function App() {
                       <text className="y-label" x={MARGIN.left - 14} y={yForScore(score) + 4} textAnchor="end">{score > 0 ? `+${score}` : score}</text>
                     </g>
                   ))}
-                  <text className="axis-caption" x={14} y={22}>スコア</text>
                   {ticks.map((tick) => {
                     const label = formatTick(tick, unit, doc);
                     return <g key={tick.toISOString()}>
@@ -1331,19 +1406,16 @@ function App() {
                     const date = safeDate(event.occurredAt);
                     const x = xForDate(date);
                     const y = yForScore(event.score);
-                    const above = eventLabelIsAbove(event.score, y);
-                    const labelY = y + (above ? -30 : 34);
-                    const nearLeft = x < MARGIN.left + 55;
-                    const labelX = nearLeft ? x + 9 : x;
-                    const displayTitle = event.title.length > 16 ? `${event.title.slice(0, 15)}…` : event.title;
-                    const titleWidth = Math.max(34, [...displayTitle].length * 10 + 14);
-                    const titleX = nearLeft ? labelX - 6 : labelX - titleWidth / 2;
+                    const layout = eventLabelLayouts.get(event.id);
+                    if (!layout) return null;
+                    const { x: titleX, y: titleY, width: titleWidth, height: titleHeight, above, displayTitle } = layout;
+                    const titleCenterX = titleX + titleWidth / 2;
                     return <g key={event.id} className="event-node" tabIndex={0} role="button" aria-label={`${eventDateLabel(event, doc)} ${event.title}`} onDoubleClick={(e) => { e.stopPropagation(); if (!eventDragMovedRef.current) setModal({ open: true, event }); }} onKeyDown={(e) => { if (e.key === "Enter") setModal({ open: true, event }); }}>
-                      <line className="event-stem" x1={x} x2={x} y1={y} y2={labelY + (above ? 8 : -14)} />
+                      <line className="event-stem" x1={x} x2={titleCenterX} y1={y} y2={above ? titleY + titleHeight : titleY} />
                       <circle className="event-hit-area" cx={x} cy={y} r="14" fill="transparent" style={{ cursor: "grab" }} onPointerDown={(e) => { e.stopPropagation(); dragStartRef.current = doc; eventDragStartRef.current = { x: e.clientX, y: e.clientY }; eventDragMovedRef.current = false; setDragging(event.id); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); }} />
                       <circle className={`event-dot ${eventTone(event.score)}`} cx={x} cy={y} r="7" style={{ pointerEvents: "none" }} />
-                      <rect className="event-title-bg" x={titleX} y={labelY - 14} width={titleWidth} height="20" rx="5" />
-                      <text className="event-title" x={labelX} y={labelY} textAnchor={nearLeft ? "start" : "middle"}>{displayTitle}</text>
+                      <rect className="event-title-bg" x={titleX} y={titleY} width={titleWidth} height={titleHeight} rx="6" />
+                      <text className="event-title" x={titleCenterX} y={titleY + 5}>{displayTitle}</text>
                       {index === visibleEvents.length - 1 && <title>{event.title}</title>}
                     </g>;
                   })}
@@ -1405,21 +1477,37 @@ function App() {
                     const scoreText = draggingEvent.score > 0 ? `+${draggingEvent.score}` : `${draggingEvent.score}`;
                     const badgeWidth = scoreText.length > 3 ? 56 : 46;
                     const badgeHeight = 26;
+                    const dateText = eventDateLabel(draggingEvent, doc, unit);
+                    const dateBadgeWidth = clamp(Math.ceil(approximateTextWidth(dateText, 12) + 20), 72, 210);
+                    const dateBadgeHeight = 26;
+                    const stackGap = 6;
+                    const stackHeight = badgeHeight + stackGap + dateBadgeHeight;
 
                     const fill = draggingEvent.score > 0 ? "var(--positive)" : draggingEvent.score < 0 ? "var(--negative)" : "var(--zero)";
 
                     const badgeX = clamp(dragX - badgeWidth / 2, MARGIN.left, width - MARGIN.right - badgeWidth);
-                    const titleIsAbove = eventLabelIsAbove(draggingEvent.score, dragY);
-                    const titleY = dragY + (titleIsAbove ? -30 : 34);
-                    const gap = 6;
-                    const badgeY = titleIsAbove
-                      ? titleY - 14 - gap - badgeHeight
-                      : titleY + 6 + gap;
+                    const dateBadgeX = clamp(dragX - dateBadgeWidth / 2, MARGIN.left, width - MARGIN.right - dateBadgeWidth);
+                    const draggingLayout = eventLabelLayouts.get(draggingEvent.id);
+                    const titleIsAbove = draggingLayout?.above ?? eventLabelIsAbove(draggingEvent.score, dragY);
+                    const gap = 14;
+                    const stackY = clamp(
+                      titleIsAbove ? dragY + gap : dragY - gap - stackHeight,
+                      MARGIN.top + 4,
+                      GRAPH_HEIGHT - MARGIN.bottom - stackHeight - 4,
+                    );
+                    const badgeY = titleIsAbove ? stackY : stackY + dateBadgeHeight + stackGap;
+                    const dateBadgeY = titleIsAbove ? stackY + badgeHeight + stackGap : stackY;
 
                     return (
-                      <g className="dragging-score-bubble" pointerEvents="none" transform={`translate(${badgeX},${badgeY})`}>
-                        <rect width={badgeWidth} height={badgeHeight} rx="13" fill={fill} filter="drop-shadow(0 2px 6px rgba(0,0,0,0.25))" />
-                        <text x={badgeWidth / 2} y="17" fill="#ffffff" fontSize="12" fontWeight="700" textAnchor="middle">{scoreText}</text>
+                      <g pointerEvents="none">
+                        <g className="dragging-score-bubble" transform={`translate(${badgeX},${badgeY})`}>
+                          <rect width={badgeWidth} height={badgeHeight} rx="13" fill={fill} filter="drop-shadow(0 2px 6px rgba(0,0,0,0.25))" />
+                          <text x={badgeWidth / 2} y="17" fill="#ffffff" fontSize="12" fontWeight="700" textAnchor="middle">{scoreText}</text>
+                        </g>
+                        <g className="dragging-date-bubble" transform={`translate(${dateBadgeX},${dateBadgeY})`}>
+                          <rect width={dateBadgeWidth} height={dateBadgeHeight} rx="13" />
+                          <text x={dateBadgeWidth / 2} y="17" textAnchor="middle">{dateText}</text>
+                        </g>
                       </g>
                     );
                   })()}
@@ -1565,7 +1653,7 @@ function EventDialog({ event, doc, readOnly, onClose, onSave, onDelete }: { even
       <div className="dialog-header"><div><p className="eyebrow">LIFE EVENT</p><h2>{readOnly ? "出来事" : isExisting ? "出来事を編集" : "出来事を追加"}</h2></div><IconButton label="閉じる" onClick={onClose}><X size={20} /></IconButton></div>
       <label>タイトル<input autoFocus={!readOnly} required maxLength={60} readOnly={readOnly} value={draft.title} placeholder="必須" onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
       <label className="event-date-field">{precision === "year" ? "年" : precision === "quarter" ? "四半期" : precision === "month" ? "年月" : "年月日"}<DatePickerField value={draft.occurredAt} onChange={changeEventDate} readOnly={readOnly || isBirth} precision={precision} label={precision === "year" ? "年" : precision === "quarter" ? "四半期" : precision === "month" ? "年月" : "年月日"} maxDate={writableEnd} /></label>
-      <label className="score-field"><span>スコア</span><div className="score-slider-wrap"><output className="score-bubble" style={{ left: `calc(8px + (100% - 16px) * ${scorePct})` }}>{draft.score > 0 ? `+${draft.score}` : draft.score}</output><input className="score-range" type="range" min="-100" max="100" step="10" disabled={readOnly} value={draft.score} onChange={(e) => setDraft({ ...draft, score: Number(e.target.value) })} /></div><div className="range-labels"><span>-100</span><span>0</span><span>100</span></div></label>
+      <label className="score-field"><div className="score-slider-wrap"><output className="score-bubble" style={{ left: `calc(8px + (100% - 16px) * ${scorePct})` }}>{draft.score > 0 ? `+${draft.score}` : draft.score}</output><input aria-label="値" className="score-range" type="range" min="-100" max="100" step="10" disabled={readOnly} value={draft.score} onChange={(e) => setDraft({ ...draft, score: Number(e.target.value) })} /></div><div className="range-labels"><span>-100</span><span>0</span><span>100</span></div></label>
       {(!readOnly || draft.description.trim()) && <label>ひとこと<textarea maxLength={500} readOnly={readOnly} value={draft.description} placeholder="任意" onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label>}
       {!readOnly && <div className="dialog-actions">{isExisting && draft.id !== "birth" ? <button type="button" className="button danger" onClick={() => onDelete(draft.id)}><Trash2 size={17} />削除</button> : <span />}<div><button type="button" className="button secondary" onClick={onClose}>キャンセル</button><button type="submit" className="button primary">保存する</button></div></div>}
     </form>
@@ -1862,4 +1950,3 @@ function ShareDialog({
 }
 
 export default App;
-
